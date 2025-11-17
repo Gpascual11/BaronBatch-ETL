@@ -1,0 +1,50 @@
+version: "3.9"
+
+services:
+
+  db:
+    image: mongo:latest
+    container_name: db
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+
+  extractor:
+    build: ./extractor
+    container_name: extractor
+    command: uvicorn main:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8001:8000"
+    depends_on:
+      - db
+
+  transformer_loader:
+    build: ./transformer_loader
+    container_name: transformer_loader
+    command: uvicorn main:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8002:8000"
+    depends_on:
+      - db
+
+  api_service:
+    build: ./api_service
+    container_name: api_service
+    command: uvicorn main:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8003:8000"
+    depends_on:
+      - db
+
+  dashboard:
+    build: ./dashboard
+    container_name: dashboard
+    command: streamlit run app.py --server.port=8501 --server.address=0.0.0.0
+    ports:
+      - "8501:8501"
+    depends_on:
+      - api_service
+
+volumes:
+  mongo_data:
