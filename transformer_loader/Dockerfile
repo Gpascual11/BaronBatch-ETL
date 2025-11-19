@@ -2,7 +2,7 @@ FROM python:3.11-alpine
 
 WORKDIR /app
 
-RUN pip install --no-cache-dir fastapi uvicorn pymongo python-dotenv
+RUN pip install --no-cache-dir fastapi uvicorn pymongo requests python-dotenv apscheduler
 
 COPY . .
 

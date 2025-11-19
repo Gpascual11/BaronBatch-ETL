@@ -1,7 +1,6 @@
 version: "3.9"
 
 services:
-
   db:
     image: mongo:latest
     container_name: db
@@ -16,6 +15,8 @@ services:
     command: uvicorn main:app --host 0.0.0.0 --port 8000
     ports:
       - "8001:8000"
+    environment:
+      - RIOT_API_KEY=${RIOT_API_KEY}
     depends_on:
       - db
 
@@ -34,6 +35,9 @@ services:
     command: uvicorn main:app --host 0.0.0.0 --port 8000
     ports:
       - "8003:8000"
+    environment:
+      # AFEGIM LA CLAU AQUI TAMBÉ
+      - RIOT_API_KEY=${RIOT_API_KEY}
     depends_on:
       - db
 
@@ -43,6 +47,8 @@ services:
     command: streamlit run app.py --server.port=8501 --server.address=0.0.0.0
     ports:
       - "8501:8501"
+    environment:
+      - API_URL=http://api_service:8000
     depends_on:
       - api_service
 
