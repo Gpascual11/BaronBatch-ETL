@@ -11,66 +11,91 @@ mongo = MongoClient("mongodb://db:27017")
 db = mongo["riot"]
 
 
-# --- LÒGICA DE TRANSFORMACIÓ ---
+def get_participants_extended(participants):
+    """Extreu informació detallada (Items, KDA) dels 10 jugadors"""
+    extended_list = []
+    for p in participants:
+        items = [p.get(f"item{i}", 0) for i in range(7)]
+        extended_list.append({
+            "champion": p.get("championName"),
+            "summonerName": p.get("riotIdGameName", p.get("summonerName")),
+            "teamId": p.get("teamId"),
+            "win": p.get("win"),
+            "kills": p.get("kills", 0),
+            "deaths": p.get("deaths", 0),
+            "assists": p.get("assists", 0),
+            "total_damage": p.get("totalDamageDealtToChampions", 0),
+            "items": items  # <--- ARA GUARDEM ELS ITEMS DE TOTHOM
+        })
+    return extended_list
+
+
 def run_transform_job():
-    # Busquem partides que NO tinguin processed: True
     raw_matches = list(db.matches_raw.find({"processed": False}))
 
     if not raw_matches:
-        # No imprimim res per no omplir els logs de brossa si no hi ha feina
         return
 
-    print(f"⚙️ [AUTO] Processant {len(raw_matches)} partides noves...")
+    print(f"⚙️ [AUTO] Processant {len(raw_matches)} partides noves (v4 Grid)...")
 
     for raw in raw_matches:
         data = raw.get("raw")
         match_id = raw.get("matchId")
         puuid = raw.get("puuid")
 
-        # Validacions bàsiques
         if not data or "info" not in data:
             db.matches_raw.update_one({"_id": raw["_id"]}, {"$set": {"processed": True}})
             continue
 
-        participant = None
-        for p in data["info"].get("participants", []):
+        all_participants = data["info"].get("participants", [])
+
+        target_p = None
+        for p in all_participants:
             if p.get("puuid") == puuid:
-                participant = p
+                target_p = p
                 break
 
-        if not participant:
+        if not target_p:
             db.matches_raw.update_one({"_id": raw["_id"]}, {"$set": {"processed": True}})
             continue
 
-        # Càlculs (ETL)
-        deaths = participant.get("deaths", 0)
-        kda = (participant.get("kills", 0) + participant.get("assists", 0)) / max(1, deaths)
+        queue_id = data["info"].get("queueId", 0)
+        game_ts_ms = data["info"].get("gameEndTimestamp", data["info"].get("gameCreation"))
+
+        deaths = target_p.get("deaths", 0)
+        kda = (target_p.get("kills", 0) + target_p.get("assists", 0)) / max(1, deaths)
         duration = data["info"].get("gameDuration", 1)
-        cs = participant.get("totalMinionsKilled", 0) + participant.get("neutralMinionsKilled", 0)
+        cs = target_p.get("totalMinionsKilled", 0) + target_p.get("neutralMinionsKilled", 0)
         cs_min = cs / (duration / 60) if duration > 0 else 0.0
+
+        # Guardem només els items del main player pel camp "items" principal (compatibilitat)
+        items = [target_p.get(f"item{i}", 0) for i in range(7)]
 
         clean_doc = {
             "matchId": match_id,
             "puuid": puuid,
-            "champion": participant.get("championName"),
-            "win": participant.get("win"),
-            "kills": participant.get("kills"),
-            "deaths": participant.get("deaths"),
-            "assists": participant.get("assists"),
+            "queue_id": queue_id,
+            "champion": target_p.get("championName"),
+            "win": target_p.get("win"),
+            "kills": target_p.get("kills"),
+            "deaths": target_p.get("deaths"),
+            "assists": target_p.get("assists"),
             "kda": round(kda, 2),
             "cs": cs,
-            "cs_min": round(cs_min, 2),
-            "timestamp": datetime.utcnow()
+            "cs_min": round(cs_min, 1),
+            "total_damage": target_p.get("totalDamageDealtToChampions", 0),
+            "gold_earned": target_p.get("goldEarned", 0),
+            "items": items,
+            "game_timestamp": game_ts_ms,
+            # NOU: Llista estesa amb items de tothom
+            "participants": get_participants_extended(all_participants),
+            "processed_at": datetime.utcnow()
         }
 
-        # Guardem a Clean
         db.matches_clean.insert_one(clean_doc)
-
-        # Marquem Raw com processada
         db.matches_raw.update_one({"_id": raw["_id"]}, {"$set": {"processed": True}})
 
-        # Actualitzem Estadístiques Agregades
-        champ = participant.get("championName")
+        champ = target_p.get("championName")
         stats = db.aggregated_stats.find_one({"puuid": puuid, "champion": champ})
 
         if not stats:
@@ -78,27 +103,25 @@ def run_transform_job():
                 "puuid": puuid,
                 "champion": champ,
                 "games": 1,
-                "wins": 1 if participant.get("win") else 0,
+                "wins": 1 if target_p.get("win") else 0,
                 "kda_sum": clean_doc["kda"]
             })
         else:
             db.aggregated_stats.update_one(
                 {"puuid": puuid, "champion": champ},
                 {
-                    "$inc": {"games": 1, "wins": 1 if participant.get("win") else 0, "kda_sum": clean_doc["kda"]}
+                    "$inc": {"games": 1, "wins": 1 if target_p.get("win") else 0, "kda_sum": clean_doc["kda"]}
                 }
             )
-    print("✅ Processament automàtic finalitzat.")
+    print("✅ Processament v4 finalitzat.")
 
 
-# --- LIFESPAN (SCHEDULER) ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     scheduler = BackgroundScheduler()
-    # Executa cada 2 minuts per ser ràpid quan arriben dades
     scheduler.add_job(run_transform_job, 'interval', minutes=2)
     scheduler.start()
-    print("🚀 Scheduler del Transformer INICIAT (cada 2 minuts)")
+    print("🚀 Scheduler del Transformer (v4) INICIAT")
     yield
     scheduler.shutdown()
 
@@ -108,7 +131,7 @@ app = FastAPI(lifespan=lifespan)
 
 @app.get("/")
 def root():
-    return {"status": "Transformer Running", "mode": "Automatic (Every 2m)"}
+    return {"status": "Transformer v4 Running"}
 
 
 @app.get("/trigger_process")
