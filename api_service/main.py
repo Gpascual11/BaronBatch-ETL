@@ -1,17 +1,13 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from pymongo import MongoClient
-from pymongo.errors import ServerSelectionTimeoutError
 import os
 import requests
 from dotenv import load_dotenv
-from contextlib import asynccontextmanager
 
 load_dotenv()
 
 RIOT_API_KEY = os.getenv("RIOT_API_KEY")
-# Ja no usem constants globals fixes, depèn del jugador
-
 mongo = MongoClient("mongodb://db:27017", serverSelectionTimeoutMS=3000)
 db = mongo["riot"]
 
@@ -22,11 +18,11 @@ class SummonerRequest(BaseModel):
     name_tag: str
 
 
-def get_region_routing(name_tag):
-    tag = name_tag.split("#")[-1].upper()
-    if tag == "KR1": return "asia"
-    if tag == "NA1": return "americas"
-    return "europe"  # Defecte
+def get_routing_info(tag):
+    tag = tag.upper()
+    if tag == "KR1": return "asia", "kr"
+    if tag == "NA1": return "americas", "na1"
+    return "europe", "euw1"
 
 
 def check_db():
@@ -52,39 +48,53 @@ def add_summoner(request: SummonerRequest):
     if not check_db(): raise HTTPException(503, "DB Loading...")
 
     full_name = request.name_tag
-    if "#" not in full_name: raise HTTPException(400, "Format: Nom#Tag")
+    if "#" not in full_name: raise HTTPException(400, "Format: Name#Tag")
 
-    # Detectem regió
-    region = get_region_routing(full_name)
-
+    tag = full_name.split("#")[-1]
+    api_region, platform = get_routing_info(tag)
     game_name, tag_line = full_name.split("#", 1)
-    url = f"https://{region}.api.riotgames.com/riot/account/v1/accounts/by-riot-id/{game_name}/{tag_line}?api_key={RIOT_API_KEY}"
+
+    acc_url = f"https://{api_region}.api.riotgames.com/riot/account/v1/accounts/by-riot-id/{game_name}/{tag_line}?api_key={RIOT_API_KEY}"
 
     try:
-        r = requests.get(url, timeout=5)
+        r = requests.get(acc_url, timeout=5)
     except:
         raise HTTPException(504, "Timeout Riot API")
 
-    if r.status_code == 404: raise HTTPException(404, "No trobat.")
-    if r.status_code == 429: raise HTTPException(429, "Rate Limit.")
-    if r.status_code != 200: raise HTTPException(400, "Error API.")
+    if r.status_code == 404: raise HTTPException(404, "Player not found")
+    if r.status_code != 200: raise HTTPException(400, "Error API")
 
     data = r.json()
     puuid = data.get("puuid")
     real_name = f"{data.get('gameName')}#{data.get('tagLine')}"
 
-    db.summoners.update_one(
-        {"puuid": puuid},
-        {"$set": {"summonerName": real_name, "region": region}},  # Guardem la regió correcta
-        upsert=True
-    )
+    # Insert initial data
+    update_data = {
+        "summonerName": real_name,
+        "region": api_region,
+    }
 
+    db.summoners.update_one({"puuid": puuid}, {"$set": update_data}, upsert=True)
+
+    # Trigger Extractor
     try:
         requests.get("http://extractor:8000/trigger_extract?count=50", timeout=0.5)
     except:
         pass
 
-    return {"message": f"✅ {real_name} afegit!"}
+    return {"message": f"✅ {real_name} added! Fetching data..."}
+
+
+# --- NEW ENDPOINT TO FIX DATA ---
+@app.get("/refresh")
+def force_refresh():
+    """Manually triggers the Extractor to update Icons, Levels, and Matches"""
+    try:
+        # This calls the Extractor service internally
+        requests.get("http://extractor:8000/trigger_extract?count=50", timeout=1)
+        return {"status": "Update Signal Sent"}
+    except Exception as e:
+        return {"status": "Error", "detail": str(e)}
 
 
 @app.get("/stats/{summoner}")
@@ -95,8 +105,12 @@ def get_stats(summoner: str):
     if not summ: return {"error": "not found"}
 
     puuid = summ.get("puuid")
+
     matches = list(
-        db.matches_clean.find({"puuid": puuid}, {"_id": 0}).sort([("game_timestamp", -1), ("timestamp", -1)]).limit(50))
+        db.matches_clean.find({"puuid": puuid}, {"_id": 0})
+        .sort([("game_timestamp", -1)])
+        .limit(50)
+    )
 
     agg_dict = {}
     for m in matches:

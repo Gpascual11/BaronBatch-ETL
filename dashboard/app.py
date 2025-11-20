@@ -32,6 +32,7 @@ def get_champ_img(name):
 
 
 def get_profile_icon(icon_id):
+    # If icon_id is 0 or None, default to 29
     if not icon_id: icon_id = 29
     return f"https://ddragon.leagueoflegends.com/cdn/{VER}/img/profileicon/{icon_id}.png"
 
@@ -71,6 +72,14 @@ def try_add_summoner(name):
         return (False, f"Error: {str(e)}")
 
 
+def trigger_refresh():
+    try:
+        requests.get(f"{API_URL}/refresh", timeout=2)
+        return True
+    except:
+        return False
+
+
 # --- SIDEBAR ---
 with st.sidebar:
     st.title("🎮 LoL Pro")
@@ -87,7 +96,19 @@ with st.sidebar:
         st.warning("Connecting to DB...")
 
     st.markdown("---")
-    if st.button("🔄 Refresh"): st.rerun()
+
+    # NEW BUTTONS
+    c_ref, c_force = st.columns(2)
+    with c_ref:
+        if st.button("🔄 Reload"): st.rerun()
+    with c_force:
+        if st.button("⚡ Update"):
+            if trigger_refresh():
+                st.toast("Update Signal Sent!", icon="🚀")
+                time.sleep(2)
+                st.rerun()
+            else:
+                st.error("Failed to trigger update")
 
 # --- MAIN ---
 st.write("")
@@ -108,7 +129,8 @@ safe_name = urllib.parse.quote(target)
 try:
     res = requests.get(f"{API_URL}/stats/{safe_name}", timeout=10).json()
 except:
-    st.error("Error connecting to API Service."); st.stop()
+    st.error("Error connecting to API Service.");
+    st.stop()
 
 if 'error' in res:
     if "#" in target:
@@ -138,8 +160,11 @@ wr_color = "#5383e8" if general_wr >= 50 else "#e84057"
 # --- HEADER ---
 c_prof, c_inf, c_rank = st.columns([1, 3, 2])
 with c_prof:
-    icon_url = get_profile_icon(res.get('profile_icon', 29))
+    # Default 29 if 0 or missing
+    icon_id_raw = res.get('profile_icon', 29)
+    icon_url = get_profile_icon(icon_id_raw if icon_id_raw != 0 else 29)
     level = res.get('level', 0)
+
     st.markdown(f"""
         <div style='text-align:center'>
             <img src='{icon_url}' style='width:90px; border-radius:20px; border:2px solid #d4af37; box-shadow: 0 0 15px rgba(0,0,0,0.6);'>

@@ -4,6 +4,7 @@ from dotenv import load_dotenv
 from datetime import datetime
 from apscheduler.schedulers.background import BackgroundScheduler
 from contextlib import asynccontextmanager
+import sys
 
 load_dotenv()
 
@@ -11,8 +12,13 @@ mongo = MongoClient("mongodb://db:27017")
 db = mongo["riot"]
 
 
+def log(msg):
+    print(msg)
+    sys.stdout.flush()
+
+
 def get_participants_extended(participants):
-    """Extreu informació detallada (Items, KDA) dels 10 jugadors"""
+    """Extract detailed info (Items, KDA) for all 10 players"""
     extended_list = []
     for p in participants:
         items = [p.get(f"item{i}", 0) for i in range(7)]
@@ -25,18 +31,16 @@ def get_participants_extended(participants):
             "deaths": p.get("deaths", 0),
             "assists": p.get("assists", 0),
             "total_damage": p.get("totalDamageDealtToChampions", 0),
-            "items": items  # <--- ARA GUARDEM ELS ITEMS DE TOTHOM
+            "items": items
         })
     return extended_list
 
 
 def run_transform_job():
     raw_matches = list(db.matches_raw.find({"processed": False}))
+    if not raw_matches: return
 
-    if not raw_matches:
-        return
-
-    print(f"⚙️ [AUTO] Processant {len(raw_matches)} partides noves (v4 Grid)...")
+    log(f"⚙️ [AUTO] Processing {len(raw_matches)} matches...")
 
     for raw in raw_matches:
         data = raw.get("raw")
@@ -49,11 +53,7 @@ def run_transform_job():
 
         all_participants = data["info"].get("participants", [])
 
-        target_p = None
-        for p in all_participants:
-            if p.get("puuid") == puuid:
-                target_p = p
-                break
+        target_p = next((p for p in all_participants if p.get("puuid") == puuid), None)
 
         if not target_p:
             db.matches_raw.update_one({"_id": raw["_id"]}, {"$set": {"processed": True}})
@@ -61,14 +61,13 @@ def run_transform_job():
 
         queue_id = data["info"].get("queueId", 0)
         game_ts_ms = data["info"].get("gameEndTimestamp", data["info"].get("gameCreation"))
+        duration = data["info"].get("gameDuration", 1)
 
         deaths = target_p.get("deaths", 0)
         kda = (target_p.get("kills", 0) + target_p.get("assists", 0)) / max(1, deaths)
-        duration = data["info"].get("gameDuration", 1)
+
         cs = target_p.get("totalMinionsKilled", 0) + target_p.get("neutralMinionsKilled", 0)
         cs_min = cs / (duration / 60) if duration > 0 else 0.0
-
-        # Guardem només els items del main player pel camp "items" principal (compatibilitat)
         items = [target_p.get(f"item{i}", 0) for i in range(7)]
 
         clean_doc = {
@@ -78,7 +77,7 @@ def run_transform_job():
             "champion": target_p.get("championName"),
             "win": target_p.get("win"),
             "kills": target_p.get("kills"),
-            "deaths": target_p.get("deaths"),
+            "deaths": deaths,
             "assists": target_p.get("assists"),
             "kda": round(kda, 2),
             "cs": cs,
@@ -87,7 +86,6 @@ def run_transform_job():
             "gold_earned": target_p.get("goldEarned", 0),
             "items": items,
             "game_timestamp": game_ts_ms,
-            # NOU: Llista estesa amb items de tothom
             "participants": get_participants_extended(all_participants),
             "processed_at": datetime.utcnow()
         }
@@ -96,24 +94,15 @@ def run_transform_job():
         db.matches_raw.update_one({"_id": raw["_id"]}, {"$set": {"processed": True}})
 
         champ = target_p.get("championName")
-        stats = db.aggregated_stats.find_one({"puuid": puuid, "champion": champ})
+        db.aggregated_stats.update_one(
+            {"puuid": puuid, "champion": champ},
+            {
+                "$inc": {"games": 1, "wins": 1 if target_p.get("win") else 0, "kda_sum": clean_doc["kda"]}
+            },
+            upsert=True
+        )
 
-        if not stats:
-            db.aggregated_stats.insert_one({
-                "puuid": puuid,
-                "champion": champ,
-                "games": 1,
-                "wins": 1 if target_p.get("win") else 0,
-                "kda_sum": clean_doc["kda"]
-            })
-        else:
-            db.aggregated_stats.update_one(
-                {"puuid": puuid, "champion": champ},
-                {
-                    "$inc": {"games": 1, "wins": 1 if target_p.get("win") else 0, "kda_sum": clean_doc["kda"]}
-                }
-            )
-    print("✅ Processament v4 finalitzat.")
+    log("✅ Transformation complete.")
 
 
 @asynccontextmanager
@@ -121,7 +110,7 @@ async def lifespan(app: FastAPI):
     scheduler = BackgroundScheduler()
     scheduler.add_job(run_transform_job, 'interval', minutes=2)
     scheduler.start()
-    print("🚀 Scheduler del Transformer (v4) INICIAT")
+    log("🚀 Transformer Started")
     yield
     scheduler.shutdown()
 
@@ -130,10 +119,10 @@ app = FastAPI(lifespan=lifespan)
 
 
 @app.get("/")
-def root():
-    return {"status": "Transformer v4 Running"}
+def root(): return {"status": "Transformer Running"}
 
 
+# --- RESTORED THIS ENDPOINT ---
 @app.get("/trigger_process")
 def manual_trigger():
     run_transform_job()
