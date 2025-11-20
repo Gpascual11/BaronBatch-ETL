@@ -13,7 +13,6 @@ load_dotenv()
 
 RIOT_API_KEY = os.getenv("RIOT_API_KEY")
 
-# Ensure we connect to the correct mongo host
 mongo = MongoClient("mongodb://db:27017")
 db = mongo["riot"]
 
@@ -29,7 +28,7 @@ def riot_get(url, timeout=10):
         if r.status_code == 429:
             log("⏳ Rate Limit (429). Sleeping 2min...")
             time.sleep(120)
-            return riot_get(url, timeout)  # Retry once
+            return riot_get(url, timeout)
         if r.status_code == 200: return r.json()
     except Exception as e:
         log(f"⚠️ Riot API Error: {e}")
@@ -44,13 +43,11 @@ def get_region_and_platform(name_tag):
 
     if tag == "KR1": return "kr", "asia"
     if tag == "NA1": return "na1", "americas"
-    # Add more mappings if needed
     return "euw1", "europe"
 
 
-# --- FIX: FUNCTION TO REPAIR MISSING ICONS/LEVELS ---
 def update_basic_summoner_info(puuid, platform, name):
-    """Updates Level and Profile Icon using Summoner-V4 if missing/outdated"""
+    """Updates Level and Profile Icon"""
     try:
         url = f"https://{platform}.api.riotgames.com/lol/summoner/v4/summoners/by-puuid/{puuid}?api_key={RIOT_API_KEY}"
         data = riot_get(url)
@@ -71,8 +68,7 @@ def update_basic_summoner_info(puuid, platform, name):
 
 
 def update_db_rank_data(puuid, solo_data):
-    if not solo_data:
-        solo_data = {}
+    if not solo_data: solo_data = {}
 
     rank_data = {
         "last_rank_update": datetime.utcnow(),
@@ -99,7 +95,6 @@ def fetch_and_update_rank_fast(enc_id, platform, puuid, name):
             solo = next((l for l in data if l['queueType'] == 'RANKED_SOLO_5x5'), None)
             if solo or not data:
                 return update_db_rank_data(puuid, solo)
-
     except Exception as e:
         log(f"🔥 Error Rank Fast {name}: {e}")
     return False
@@ -111,9 +106,6 @@ def fetch_rank_advanced(puuid, platform, name):
 
     for tier in tiers_high_elo:
         url = f"https://{platform}.api.riotgames.com/lol/league/v4/{tier.lower()}leagues/by-queue/RANKED_SOLO_5x5?api_key={RIOT_API_KEY}"
-        # Challenger/GM/Master endpoint specifics can be handled by exact URL if needed,
-        # but commonly v4/{tier}leagues works or specific named endpoints.
-        # Using specific endpoints for safety:
         if tier == "CHALLENGER":
             url = f"https://{platform}.api.riotgames.com/lol/league/v4/challengerleagues/by-queue/RANKED_SOLO_5x5?api_key={RIOT_API_KEY}"
         elif tier == "GRANDMASTER":
@@ -141,14 +133,19 @@ def fetch_rank_advanced(puuid, platform, name):
     return True
 
 
-def run_extraction_job(limit=50):
+def run_extraction_job(limit=50, target_puuid=None):
     log(f"⏰ [AUTO] Extraction Cycle Started ({limit} matches)")
     if not RIOT_API_KEY:
         log("❌ API KEY MISSING")
         return
 
     try:
-        raw_summoners = list(db.summoners.find({}))
+        if target_puuid:
+            target_user = db.summoners.find_one({"puuid": target_puuid})
+            raw_summoners = [target_user] if target_user else []
+            log(f"🎯 Targeting single user: {target_puuid}")
+        else:
+            raw_summoners = list(db.summoners.find({}))
     except:
         log("❌ DB Connection Error")
         return
@@ -161,11 +158,9 @@ def run_extraction_job(limit=50):
         saved_id = summ.get("encryptedSummonerId")
         platform, region = get_region_and_platform(name)
 
-        # 1. --- REPAIR STEP: Fix Icon & Level ---
-        # This guarantees the icon/level is fetched even if API failed before
+        # 1. Repair Icon/Level
         _, fetched_id = update_basic_summoner_info(puuid, platform, name)
-        if not saved_id and fetched_id:
-            saved_id = fetched_id
+        if not saved_id and fetched_id: saved_id = fetched_id
 
         # 2. Update Rank
         rank_updated = False
@@ -180,35 +175,63 @@ def run_extraction_job(limit=50):
             r = requests.get(ids_url, timeout=10)
             if r.status_code == 200:
                 match_ids = r.json()
+
+                if not isinstance(match_ids, list):
+                    continue
+
                 new_c = 0
                 for match_id in match_ids:
+                    # TRY INSERT DIRECTLY (Relies on Unique Index to prevent dupes)
+                    # Or check if exists (but race conditions can bypass this)
                     exists = db.matches_raw.find_one({"matchId": match_id})
                     if exists: continue
 
-                    m_url = f"https://{region}.api.riotgames.com/lol/match/v5/matches/{match_id}?api_key={RIOT_API_KEY}"
-                    raw_r = requests.get(m_url, timeout=10)
+                    try:
+                        m_url = f"https://{region}.api.riotgames.com/lol/match/v5/matches/{match_id}?api_key={RIOT_API_KEY}"
+                        raw_r = requests.get(m_url, timeout=10)
 
-                    if raw_r.status_code == 200:
-                        data = raw_r.json()
-                        db.matches_raw.insert_one({
-                            "matchId": match_id, "puuid": puuid,
-                            "raw": data, "processed": False,
-                            "timestamp": datetime.utcnow()
-                        })
-                        new_c += 1
-                        time.sleep(0.1)  # Be nice to API
+                        if raw_r.status_code == 429:
+                            time.sleep(5)
+                            continue
+
+                        if raw_r.status_code == 200:
+                            data = raw_r.json()
+                            # Use try/except for Unique Index violation
+                            try:
+                                db.matches_raw.insert_one({
+                                    "matchId": match_id, "puuid": puuid,
+                                    "raw": data, "processed": False,
+                                    "timestamp": datetime.utcnow()
+                                })
+                                new_c += 1
+                            except:
+                                # Ignore duplicate key error
+                                pass
+
+                            time.sleep(0.1)
+                    except Exception as inner_e:
+                        log(f"⚠️ Failed match {match_id}: {inner_e}")
+                        continue
 
                 if new_c > 0: log(f"📥 {name}: +{new_c} new matches")
         except Exception as e:
-            log(f"❌ Error downloading matches for {name}: {e}")
+            log(f"❌ Error getting match list for {name}: {e}")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # --- STARTUP: ENSURE UNIQUE INDEX ---
+    # This prevents duplicates from ever entering the DB again
+    try:
+        db.matches_raw.create_index("matchId", unique=True)
+        log("🔒 Unique Index on matchId ensured.")
+    except Exception as e:
+        log(f"⚠️ Could not create index (Run cleanup first): {e}")
+
     scheduler = BackgroundScheduler()
-    scheduler.add_job(run_extraction_job, 'interval', minutes=30, kwargs={"limit": 50})
+    scheduler.add_job(run_extraction_job, 'interval', minutes=10, kwargs={"limit": 50})
     scheduler.start()
-    log("🚀 Extractor Started (v5)")
+    log("🚀 Extractor Started (v5 - Robust Loop)")
     yield
     scheduler.shutdown()
 
@@ -221,6 +244,6 @@ def root(): return {"status": "Extractor Running"}
 
 
 @app.get("/trigger_extract")
-def manual_trigger(background_tasks: BackgroundTasks, count: int = 50):
-    background_tasks.add_task(run_extraction_job, limit=count)
-    return {"status": "Job started"}
+def manual_trigger(background_tasks: BackgroundTasks, count: int = 50, puuid: str = None):
+    background_tasks.add_task(run_extraction_job, limit=count, target_puuid=puuid)
+    return {"status": "Job started", "target": puuid or "ALL"}

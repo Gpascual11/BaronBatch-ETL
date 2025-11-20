@@ -108,9 +108,10 @@ def run_transform_job():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     scheduler = BackgroundScheduler()
-    scheduler.add_job(run_transform_job, 'interval', minutes=2)
+    # Process every 1 minute
+    scheduler.add_job(run_transform_job, 'interval', minutes=1)
     scheduler.start()
-    log("🚀 Transformer Started")
+    log("🚀 Transformer Started (Fast Mode)")
     yield
     scheduler.shutdown()
 
@@ -122,7 +123,6 @@ app = FastAPI(lifespan=lifespan)
 def root(): return {"status": "Transformer Running"}
 
 
-# --- RESTORED THIS ENDPOINT ---
 @app.get("/trigger_process")
 def manual_trigger():
     run_transform_job()

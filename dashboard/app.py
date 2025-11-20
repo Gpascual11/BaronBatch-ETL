@@ -32,7 +32,6 @@ def get_champ_img(name):
 
 
 def get_profile_icon(icon_id):
-    # If icon_id is 0 or None, default to 29
     if not icon_id: icon_id = 29
     return f"https://ddragon.leagueoflegends.com/cdn/{VER}/img/profileicon/{icon_id}.png"
 
@@ -67,15 +66,46 @@ def get_summoners():
 def try_add_summoner(name):
     try:
         r = requests.post(f"{API_URL}/add_summoner", json={"name_tag": name}, timeout=30)
-        return (r.status_code == 200, r.json().get("message") if r.status_code == 200 else r.text)
+        if r.status_code == 200:
+            return True, r.json()
+        else:
+            return False, r.text
     except Exception as e:
-        return (False, f"Error: {str(e)}")
+        return False, f"Error: {str(e)}"
 
 
 def trigger_refresh():
     try:
         requests.get(f"{API_URL}/refresh", timeout=2)
         return True
+    except:
+        return False
+
+
+def delete_user(name):
+    try:
+        safe = urllib.parse.quote(name)
+        r = requests.delete(f"{API_URL}/summoner/{safe}", timeout=5)
+        return r.status_code == 200
+    except:
+        return False
+
+
+def trigger_cleanup():
+    try:
+        r = requests.delete(f"{API_URL}/maintenance/cleanup", timeout=30)
+        if r.status_code == 200:
+            return True, r.json()
+        return False, "Error"
+    except Exception as e:
+        return False, str(e)
+
+
+# --- NEW NUKE REQUEST ---
+def trigger_nuke():
+    try:
+        r = requests.delete(f"{API_URL}/maintenance/nuke", timeout=5)
+        return r.status_code == 200
     except:
         return False
 
@@ -97,7 +127,6 @@ with st.sidebar:
 
     st.markdown("---")
 
-    # NEW BUTTONS
     c_ref, c_force = st.columns(2)
     with c_ref:
         if st.button("🔄 Reload"): st.rerun()
@@ -109,6 +138,42 @@ with st.sidebar:
                 st.rerun()
             else:
                 st.error("Failed to trigger update")
+
+    if st.session_state['current_user']:
+        st.write("")
+        if st.button("🗑️ Delete User", type="primary", use_container_width=True):
+            target_to_del = st.session_state['current_user']
+            if delete_user(target_to_del):
+                st.session_state['current_user'] = None
+                st.success(f"Deleted {target_to_del}")
+                time.sleep(1)
+                st.rerun()
+            else:
+                st.error("Delete failed")
+
+    st.markdown("---")
+    with st.expander("🔧 Maintenance"):
+        if st.button("🧹 Cleanup DB"):
+            with st.spinner("Cleaning orphans..."):
+                ok, res = trigger_cleanup()
+                if ok:
+                    st.success(f"Cleaned {res.get('deleted_raw')} raw matches!")
+                    time.sleep(2)
+                    st.rerun()
+                else:
+                    st.error(f"Failed: {res}")
+
+        st.markdown("---")
+        st.markdown("**Danger Zone**")
+        if st.checkbox("Enable Factory Reset"):
+            if st.button("💥 FACTORY RESET", type="primary"):
+                if trigger_nuke():
+                    st.session_state['current_user'] = None
+                    st.success("Database Wiped! Reloading...")
+                    time.sleep(2)
+                    st.rerun()
+                else:
+                    st.error("Reset Failed")
 
 # --- MAIN ---
 st.write("")
@@ -135,14 +200,17 @@ except:
 if 'error' in res:
     if "#" in target:
         with st.status(f"🚀 Adding **{target}**...") as status:
-            ok, msg = try_add_summoner(target)
+            ok, response = try_add_summoner(target)
             if ok:
-                status.write("✅ Player found!")
+                if isinstance(response, dict) and 'correct_name' in response:
+                    st.session_state['current_user'] = response['correct_name']
+
+                status.write(f"✅ Found: {st.session_state['current_user']}")
                 time.sleep(1.5)
                 st.rerun()
             else:
                 status.update(label="Error", state="error")
-                st.error(msg);
+                st.error(response)
                 st.stop()
     else:
         st.error("Player not found.");
@@ -151,7 +219,6 @@ if 'error' in res:
 matches = res.get('matches', [])
 agg = res.get('aggregated', [])
 
-# --- GENERAL WINRATE CALCULATION ---
 total_games = len(matches)
 total_wins = sum(1 for m in matches if m['win'])
 general_wr = (total_wins / total_games * 100) if total_games > 0 else 0
@@ -160,7 +227,6 @@ wr_color = "#5383e8" if general_wr >= 50 else "#e84057"
 # --- HEADER ---
 c_prof, c_inf, c_rank = st.columns([1, 3, 2])
 with c_prof:
-    # Default 29 if 0 or missing
     icon_id_raw = res.get('profile_icon', 29)
     icon_url = get_profile_icon(icon_id_raw if icon_id_raw != 0 else 29)
     level = res.get('level', 0)

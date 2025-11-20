@@ -4,6 +4,7 @@ from pymongo import MongoClient
 import os
 import requests
 from dotenv import load_dotenv
+import re
 
 load_dotenv()
 
@@ -50,25 +51,33 @@ def add_summoner(request: SummonerRequest):
     full_name = request.name_tag
     if "#" not in full_name: raise HTTPException(400, "Format: Name#Tag")
 
-    tag = full_name.split("#")[-1]
-    api_region, platform = get_routing_info(tag)
-    game_name, tag_line = full_name.split("#", 1)
+    tag = full_name.split("#")[-1].strip()
+    game_name = full_name.split("#")[0].strip()
 
-    acc_url = f"https://{api_region}.api.riotgames.com/riot/account/v1/accounts/by-riot-id/{game_name}/{tag_line}?api_key={RIOT_API_KEY}"
+    api_region, platform = get_routing_info(tag)
+
+    acc_url = f"https://{api_region}.api.riotgames.com/riot/account/v1/accounts/by-riot-id/{game_name}/{tag}?api_key={RIOT_API_KEY}"
 
     try:
         r = requests.get(acc_url, timeout=5)
     except:
-        raise HTTPException(504, "Timeout Riot API")
+        raise HTTPException(504, "Timeout contacting Riot API")
 
-    if r.status_code == 404: raise HTTPException(404, "Player not found")
-    if r.status_code != 200: raise HTTPException(400, "Error API")
+    # --- IMPROVED ERROR HANDLING ---
+    if r.status_code == 404:
+        raise HTTPException(404, "Player not found (Check spelling)")
+    if r.status_code == 429:
+        raise HTTPException(429, "Riot Rate Limit (429). Please wait 2 mins.")
+    if r.status_code == 403:
+        raise HTTPException(403, "API Key Expired or Invalid (403).")
+    if r.status_code != 200:
+        # Pass the actual error text from Riot for debugging
+        raise HTTPException(400, f"Riot Error {r.status_code}: {r.text}")
 
     data = r.json()
     puuid = data.get("puuid")
     real_name = f"{data.get('gameName')}#{data.get('tagLine')}"
 
-    # Insert initial data
     update_data = {
         "summonerName": real_name,
         "region": api_region,
@@ -76,21 +85,104 @@ def add_summoner(request: SummonerRequest):
 
     db.summoners.update_one({"puuid": puuid}, {"$set": update_data}, upsert=True)
 
-    # Trigger Extractor
     try:
-        requests.get("http://extractor:8000/trigger_extract?count=50", timeout=0.5)
+        # Trigger extraction for this specific user
+        requests.get(f"http://extractor:8000/trigger_extract?count=50&puuid={puuid}", timeout=0.5)
     except:
         pass
 
-    return {"message": f"✅ {real_name} added! Fetching data..."}
+    return {
+        "message": f"✅ {real_name} added! Fetching data...",
+        "correct_name": real_name
+    }
 
 
-# --- NEW ENDPOINT TO FIX DATA ---
+@app.delete("/summoner/{name_tag}")
+def delete_summoner(name_tag: str):
+    if not check_db(): raise HTTPException(503, "DB Down")
+
+    clean_search = name_tag.replace(" ", "")
+    if "#" in name_tag:
+        parts = name_tag.split("#")
+        clean_search = f"{parts[0].strip()}#{parts[1].strip()}"
+
+    query = {"summonerName": {"$regex": f"^{re.escape(clean_search)}$", "$options": "i"}}
+    summ = db.summoners.find_one(query)
+
+    if not summ:
+        raise HTTPException(404, "Summoner not found in DB")
+
+    puuid = summ.get("puuid")
+    name = summ.get("summonerName")
+
+    db.summoners.delete_one({"puuid": puuid})
+    db.matches_raw.delete_many({"puuid": puuid})
+    db.matches_clean.delete_many({"puuid": puuid})
+    db.aggregated_stats.delete_many({"puuid": puuid})
+
+    return {"message": f"🗑️ Deleted {name} and all data."}
+
+
+@app.delete("/maintenance/cleanup")
+def cleanup_data():
+    if not check_db(): raise HTTPException(503, "DB Down")
+
+    valid_puuids = [s["puuid"] for s in db.summoners.find({}, {"puuid": 1})]
+    raw_res = db.matches_raw.delete_many({"puuid": {"$nin": valid_puuids}})
+    clean_res = db.matches_clean.delete_many({"puuid": {"$nin": valid_puuids}})
+
+    pipeline = [
+        {"$group": {"_id": "$matchId", "ids": {"$push": "$_id"}, "count": {"$sum": 1}}},
+        {"$match": {"count": {"$gt": 1}}}
+    ]
+    duplicates = list(db.matches_raw.aggregate(pipeline))
+    deleted_dupes = 0
+    for doc in duplicates:
+        ids_to_delete = doc['ids'][1:]
+        db.matches_raw.delete_many({"_id": {"$in": ids_to_delete}})
+        deleted_dupes += len(ids_to_delete)
+
+    deleted_excess = 0
+    for puuid in valid_puuids:
+        matches = list(db.matches_raw.find({"puuid": puuid}).sort("timestamp", -1))
+        if len(matches) > 50:
+            to_remove = matches[50:]
+            ids = [m["_id"] for m in to_remove]
+            db.matches_raw.delete_many({"_id": {"$in": ids}})
+            deleted_excess += len(ids)
+
+        c_matches = list(db.matches_clean.find({"puuid": puuid}).sort("game_timestamp", -1))
+        if len(c_matches) > 50:
+            c_to_remove = c_matches[50:]
+            c_ids = [m["_id"] for m in c_to_remove]
+            db.matches_clean.delete_many({"_id": {"$in": c_ids}})
+
+    try:
+        db.matches_raw.create_index("matchId", unique=True)
+    except:
+        pass
+
+    return {
+        "message": "Deep Clean Successful",
+        "deleted_orphans": raw_res.deleted_count,
+        "deleted_duplicates": deleted_dupes,
+        "trimmed_excess": deleted_excess
+    }
+
+
+@app.delete("/maintenance/nuke")
+def nuke_database():
+    if not check_db(): raise HTTPException(503, "DB Down")
+    db.summoners.delete_many({})
+    db.matches_raw.delete_many({})
+    db.matches_clean.delete_many({})
+    db.aggregated_stats.delete_many({})
+    return {"message": "💥 Database completely wiped. Ready for fresh start."}
+
+
 @app.get("/refresh")
 def force_refresh():
-    """Manually triggers the Extractor to update Icons, Levels, and Matches"""
     try:
-        # This calls the Extractor service internally
         requests.get("http://extractor:8000/trigger_extract?count=50", timeout=1)
         return {"status": "Update Signal Sent"}
     except Exception as e:
@@ -101,7 +193,19 @@ def force_refresh():
 def get_stats(summoner: str):
     if not check_db(): raise HTTPException(503, "DB Down")
 
+    clean_search = summoner.replace(" ", "")
+    if "#" in summoner:
+        parts = summoner.split("#")
+        clean_search = f"{parts[0].strip()}#{parts[1].strip()}"
+
+    query = {"summonerName": {"$regex": f"^{re.escape(clean_search)}$", "$options": "i"}}
+
     summ = db.summoners.find_one({"summonerName": summoner})
+    if not summ:
+        summ = db.summoners.find_one(query)
+
+    # This returns 200 OK, but with {"error": ...} in the body.
+    # The frontend sees this and triggers the Auto-Add.
     if not summ: return {"error": "not found"}
 
     puuid = summ.get("puuid")
