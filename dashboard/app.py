@@ -279,15 +279,115 @@ with c_rank:
 
 st.markdown("---")
 
+# --- CUSTOM CSS STYLING ---
 st.markdown("""
 <style>
-    .match-card { background-color: #18181b; border-radius: 5px; padding: 5px; margin-bottom: 5px; border-left: 4px solid #333; }
-    .win { border-left-color: #5383e8; background: rgba(40,52,78,0.3); }
-    .loss { border-left-color: #e84057; background: rgba(59,42,46,0.3); }
-    .kda-main { font-weight:bold; font-size:1em; }
-    .meta { font-size:0.75em; color:#888; }
-    .item-icon { width:20px; height:20px; border-radius:3px; border:1px solid #222; }
-    .player-row { display: flex; justify-content: space-between; font-size: 0.8em; padding: 2px; border-bottom: 1px solid #222; }
+    /* Importar fuente estilo Gaming (Oswald) */
+    @import url('https://fonts.googleapis.com/css2?family=Oswald:wght@300;400;700&display=swap');
+
+    html, body, [class*="css"]  {
+        font-family: 'Oswald', sans-serif;
+    }
+
+    /* Fondo general con un degradado sutil */
+    .stApp {
+        background: linear-gradient(180deg, #091428 0%, #040810 100%);
+    }
+
+    /* Sidebar más oscura y con borde dorado sutil */
+    [data-testid="stSidebar"] {
+        background-color: #0a0a0c;
+        border-right: 1px solid #333;
+    }
+
+    /* Títulos y Encabezados */
+    h1, h2, h3 {
+        color: #f0e6d2 !important;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+        text-shadow: 0 0 10px rgba(212, 175, 55, 0.3);
+    }
+
+    /* Inputs de texto personalizados */
+    .stTextInput input {
+        background-color: #1e2328 !important;
+        color: #f0e6d2 !important;
+        border: 1px solid #c8aa6e !important;
+        border-radius: 4px;
+    }
+
+    /* Botones primarios (Estilo Hextech) */
+    .stButton button[type="primary"] {
+        background: linear-gradient(45deg, #c8aa6e, #7a5c29);
+        color: #000;
+        border: none;
+        font-weight: bold;
+        text-transform: uppercase;
+        transition: all 0.3s ease;
+    }
+    .stButton button[type="primary"]:hover {
+        box-shadow: 0 0 15px #c8aa6e;
+        transform: scale(1.02);
+    }
+
+    /* Botones secundarios */
+    .stButton button {
+        background-color: #1e2328;
+        color: #cdbe91;
+        border: 1px solid #444;
+    }
+
+    /* Tabs personalizadas */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 10px;
+    }
+    .stTabs [data-baseweb="tab"] {
+        background-color: rgba(255,255,255,0.05);
+        border-radius: 4px;
+        border: none;
+        color: #888;
+    }
+    .stTabs [aria-selected="true"] {
+        background-color: #c8aa6e !important;
+        color: #000 !important;
+        font-weight: bold;
+    }
+
+    /* MATCH CARD STYLES (Mejorado) */
+    .match-card { 
+        background: rgba(20, 20, 30, 0.6); 
+        backdrop-filter: blur(10px);
+        border-radius: 8px; 
+        padding: 10px; 
+        margin-bottom: 8px; 
+        border: 1px solid rgba(255,255,255,0.05);
+        border-left: 4px solid #333; 
+        transition: transform 0.2s;
+    }
+    .match-card:hover {
+        transform: translateX(5px);
+        background: rgba(30, 30, 40, 0.8);
+    }
+    .win { 
+        border-left-color: #0ac8b9; /* Cyan Hextech para victoria */
+        background: linear-gradient(90deg, rgba(10, 200, 185, 0.1) 0%, rgba(0,0,0,0) 100%);
+    }
+    .loss { 
+        border-left-color: #e84057; 
+        background: linear-gradient(90deg, rgba(232, 64, 87, 0.1) 0%, rgba(0,0,0,0) 100%);
+    }
+
+    /* Textos dentro de las cards */
+    .kda-main { font-weight:bold; font-size:1.1em; color: #fff; letter-spacing: 1px;}
+    .meta { font-size:0.75em; color:#aaa; font-family: sans-serif;}
+    .item-icon { width:22px; height:22px; border-radius:3px; border:1px solid #444; box-shadow: 0 0 5px rgba(0,0,0,0.5);}
+    .player-row { display: flex; justify-content: space-between; font-size: 0.8em; padding: 3px 0; border-bottom: 1px solid rgba(255,255,255,0.05); }
+
+    /* Dataframe styling */
+    [data-testid="stDataFrame"] {
+        background-color: rgba(0,0,0,0.2);
+        border: 1px solid #333;
+    }
 </style>
 """, unsafe_allow_html=True)
 

@@ -8,6 +8,9 @@ from dotenv import load_dotenv
 from apscheduler.schedulers.background import BackgroundScheduler
 from contextlib import asynccontextmanager
 import sys
+import redis
+import json
+import threading
 
 load_dotenv()
 
@@ -16,6 +19,9 @@ RIOT_API_KEY = os.getenv("RIOT_API_KEY")
 mongo = MongoClient("mongodb://db:27017")
 db = mongo["riot"]
 
+# --- REDIS CONNECTION ---
+redis_client = redis.Redis(host='redis', port=6379, db=0, decode_responses=True)
+
 
 def log(msg):
     print(msg)
@@ -23,15 +29,24 @@ def log(msg):
 
 
 def riot_get(url, timeout=10):
+    """Robust GET request with Rate Limit handling"""
     try:
         r = requests.get(url, timeout=timeout)
+
         if r.status_code == 429:
             log("⏳ Rate Limit (429). Sleeping 2min...")
             time.sleep(120)
-            return riot_get(url, timeout)
-        if r.status_code == 200: return r.json()
+            return riot_get(url, timeout)  # Retry
+
+        if r.status_code == 200:
+            return r.json()
+
+        # Log other errors so we know why it failed
+        if r.status_code >= 400:
+            log(f"⚠️ API Error {r.status_code}: {url}")
+
     except Exception as e:
-        log(f"⚠️ Riot API Error: {e}")
+        log(f"⚠️ Request Exception: {e}")
     return None
 
 
@@ -47,23 +62,17 @@ def get_region_and_platform(name_tag):
 
 
 def update_basic_summoner_info(puuid, platform, name):
-    """Updates Level and Profile Icon"""
-    try:
-        url = f"https://{platform}.api.riotgames.com/lol/summoner/v4/summoners/by-puuid/{puuid}?api_key={RIOT_API_KEY}"
-        data = riot_get(url)
+    url = f"https://{platform}.api.riotgames.com/lol/summoner/v4/summoners/by-puuid/{puuid}?api_key={RIOT_API_KEY}"
+    data = riot_get(url)
 
-        if data:
-            update_data = {
-                "summonerLevel": data.get("summonerLevel", 0),
-                "profileIconId": data.get("profileIconId", 29),
-                "encryptedSummonerId": data.get("id")
-            }
-            db.summoners.update_one({"puuid": puuid}, {"$set": update_data})
-            return True, data.get("id")
-
-    except Exception as e:
-        log(f"❌ Error fetching basic info for {name}: {e}")
-
+    if data:
+        update_data = {
+            "summonerLevel": data.get("summonerLevel", 0),
+            "profileIconId": data.get("profileIconId", 29),
+            "encryptedSummonerId": data.get("id")
+        }
+        db.summoners.update_one({"puuid": puuid}, {"$set": update_data})
+        return True, data.get("id")
     return False, None
 
 
@@ -87,16 +96,13 @@ def update_db_rank_data(puuid, solo_data):
 
 
 def fetch_and_update_rank_fast(enc_id, platform, puuid, name):
-    try:
-        league_url = f"https://{platform}.api.riotgames.com/lol/league/v4/entries/by-summoner/{enc_id}?api_key={RIOT_API_KEY}"
-        data = riot_get(league_url)
+    league_url = f"https://{platform}.api.riotgames.com/lol/league/v4/entries/by-summoner/{enc_id}?api_key={RIOT_API_KEY}"
+    data = riot_get(league_url)
 
-        if data is not None:
-            solo = next((l for l in data if l['queueType'] == 'RANKED_SOLO_5x5'), None)
-            if solo or not data:
-                return update_db_rank_data(puuid, solo)
-    except Exception as e:
-        log(f"🔥 Error Rank Fast {name}: {e}")
+    if data is not None:
+        solo = next((l for l in data if l['queueType'] == 'RANKED_SOLO_5x5'), None)
+        if solo or not data:
+            return update_db_rank_data(puuid, solo)
     return False
 
 
@@ -134,7 +140,7 @@ def fetch_rank_advanced(puuid, platform, name):
 
 
 def run_extraction_job(limit=50, target_puuid=None):
-    log(f"⏰ [AUTO] Extraction Cycle Started ({limit} matches)")
+    log(f"⏰ Extraction Job Started (Target: {limit} matches)")
     if not RIOT_API_KEY:
         log("❌ API KEY MISSING")
         return
@@ -169,69 +175,92 @@ def run_extraction_job(limit=50, target_puuid=None):
         if not rank_updated:
             fetch_rank_advanced(puuid, platform, name)
 
-        # 3. Download Matches
-        ids_url = f"https://{region}.api.riotgames.com/lol/match/v5/matches/by-puuid/{puuid}/ids?count={limit}&api_key={RIOT_API_KEY}"
-        try:
-            r = requests.get(ids_url, timeout=10)
-            if r.status_code == 200:
-                match_ids = r.json()
+        # 3. Download Matches (With Pagination for >100)
+        fetched_count = 0
+        start_index = 0
 
-                if not isinstance(match_ids, list):
-                    continue
+        # Loop until we have enough matches
+        while fetched_count < limit:
+            # Riot Max is 100 per request
+            batch_size = min(100, limit - fetched_count)
 
-                new_c = 0
-                for match_id in match_ids:
-                    # TRY INSERT DIRECTLY (Relies on Unique Index to prevent dupes)
-                    # Or check if exists (but race conditions can bypass this)
-                    exists = db.matches_raw.find_one({"matchId": match_id})
-                    if exists: continue
+            ids_url = f"https://{region}.api.riotgames.com/lol/match/v5/matches/by-puuid/{puuid}/ids?start={start_index}&count={batch_size}&api_key={RIOT_API_KEY}"
 
+            # Use robust getter
+            match_ids = riot_get(ids_url)
+
+            if not match_ids or not isinstance(match_ids, list):
+                break
+
+            new_in_batch = 0
+            for match_id in match_ids:
+                exists = db.matches_raw.find_one({"matchId": match_id})
+                if exists: continue
+
+                m_url = f"https://{region}.api.riotgames.com/lol/match/v5/matches/{match_id}?api_key={RIOT_API_KEY}"
+                data = riot_get(m_url)  # Use robust getter
+
+                if data:
                     try:
-                        m_url = f"https://{region}.api.riotgames.com/lol/match/v5/matches/{match_id}?api_key={RIOT_API_KEY}"
-                        raw_r = requests.get(m_url, timeout=10)
+                        db.matches_raw.insert_one({
+                            "matchId": match_id, "puuid": puuid,
+                            "raw": data, "processed": False,
+                            "timestamp": datetime.utcnow()
+                        })
+                        new_in_batch += 1
+                    except:
+                        pass
+                    time.sleep(0.1)  # Be nice to API
 
-                        if raw_r.status_code == 429:
-                            time.sleep(5)
-                            continue
+            if new_in_batch > 0:
+                log(f"📥 {name}: +{new_in_batch} matches (Batch {start_index}-{start_index + batch_size})")
 
-                        if raw_r.status_code == 200:
-                            data = raw_r.json()
-                            # Use try/except for Unique Index violation
-                            try:
-                                db.matches_raw.insert_one({
-                                    "matchId": match_id, "puuid": puuid,
-                                    "raw": data, "processed": False,
-                                    "timestamp": datetime.utcnow()
-                                })
-                                new_c += 1
-                            except:
-                                # Ignore duplicate key error
-                                pass
+            fetched_count += len(match_ids)
+            start_index += len(match_ids)
 
-                            time.sleep(0.1)
-                    except Exception as inner_e:
-                        log(f"⚠️ Failed match {match_id}: {inner_e}")
-                        continue
+            # If we got fewer matches than asked, we reached the end of history
+            if len(match_ids) < batch_size:
+                break
 
-                if new_c > 0: log(f"📥 {name}: +{new_c} new matches")
+
+# --- REDIS WORKER ---
+def redis_worker():
+    log("👂 Redis Worker Listening...")
+    while True:
+        try:
+            _, data = redis_client.blpop("extraction_queue")
+            task = json.loads(data)
+            action = task.get("action")
+            limit = task.get("limit", 50)
+
+            if action == "extract":
+                puuid = task.get("puuid")
+                log(f"📨 Task: Extract {puuid} (limit={limit})")
+                run_extraction_job(limit=limit, target_puuid=puuid)
+
+            elif action == "refresh_all":
+                log(f"📨 Task: Refresh ALL (limit={limit})")
+                run_extraction_job(limit=limit)
+
         except Exception as e:
-            log(f"❌ Error getting match list for {name}: {e}")
+            log(f"❌ Redis Worker Error: {e}")
+            time.sleep(5)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # --- STARTUP: ENSURE UNIQUE INDEX ---
-    # This prevents duplicates from ever entering the DB again
     try:
         db.matches_raw.create_index("matchId", unique=True)
-        log("🔒 Unique Index on matchId ensured.")
-    except Exception as e:
-        log(f"⚠️ Could not create index (Run cleanup first): {e}")
+    except:
+        pass
+
+    threading.Thread(target=redis_worker, daemon=True).start()
 
     scheduler = BackgroundScheduler()
-    scheduler.add_job(run_extraction_job, 'interval', minutes=10, kwargs={"limit": 50})
+    scheduler.add_job(run_extraction_job, 'interval', minutes=10, kwargs={"limit": 100})
     scheduler.start()
-    log("🚀 Extractor Started (v5 - Robust Loop)")
+
+    log("🚀 Extractor Service Ready")
     yield
     scheduler.shutdown()
 
@@ -246,4 +275,4 @@ def root(): return {"status": "Extractor Running"}
 @app.get("/trigger_extract")
 def manual_trigger(background_tasks: BackgroundTasks, count: int = 50, puuid: str = None):
     background_tasks.add_task(run_extraction_job, limit=count, target_puuid=puuid)
-    return {"status": "Job started", "target": puuid or "ALL"}
+    return {"status": "Job started"}

@@ -5,12 +5,17 @@ import os
 import requests
 from dotenv import load_dotenv
 import re
+import redis
+import json
 
 load_dotenv()
 
 RIOT_API_KEY = os.getenv("RIOT_API_KEY")
 mongo = MongoClient("mongodb://db:27017", serverSelectionTimeoutMS=3000)
 db = mongo["riot"]
+
+# --- REDIS CONNECTION ---
+redis_client = redis.Redis(host='redis', port=6379, db=0, decode_responses=True)
 
 app = FastAPI()
 
@@ -63,16 +68,10 @@ def add_summoner(request: SummonerRequest):
     except:
         raise HTTPException(504, "Timeout contacting Riot API")
 
-    # --- IMPROVED ERROR HANDLING ---
-    if r.status_code == 404:
-        raise HTTPException(404, "Player not found (Check spelling)")
-    if r.status_code == 429:
-        raise HTTPException(429, "Riot Rate Limit (429). Please wait 2 mins.")
-    if r.status_code == 403:
-        raise HTTPException(403, "API Key Expired or Invalid (403).")
-    if r.status_code != 200:
-        # Pass the actual error text from Riot for debugging
-        raise HTTPException(400, f"Riot Error {r.status_code}: {r.text}")
+    if r.status_code == 404: raise HTTPException(404, "Player not found (Check spelling)")
+    if r.status_code == 429: raise HTTPException(429, "Riot Rate Limit (429). Please wait 2 mins.")
+    if r.status_code == 403: raise HTTPException(403, "API Key Expired or Invalid (403).")
+    if r.status_code != 200: raise HTTPException(400, f"Riot Error {r.status_code}: {r.text}")
 
     data = r.json()
     puuid = data.get("puuid")
@@ -85,14 +84,19 @@ def add_summoner(request: SummonerRequest):
 
     db.summoners.update_one({"puuid": puuid}, {"$set": update_data}, upsert=True)
 
+    # Push single task to Redis
     try:
-        # Trigger extraction for this specific user
-        requests.get(f"http://extractor:8000/trigger_extract?count=50&puuid={puuid}", timeout=0.5)
-    except:
-        pass
+        task_payload = {
+            "puuid": puuid,
+            "limit": 200,
+            "action": "extract"
+        }
+        redis_client.lpush("extraction_queue", json.dumps(task_payload))
+    except Exception as e:
+        print(f"⚠️ Redis Error: {e}")
 
     return {
-        "message": f"✅ {real_name} added! Fetching data...",
+        "message": f"✅ {real_name} queued for update (200 games)!",
         "correct_name": real_name
     }
 
@@ -145,15 +149,15 @@ def cleanup_data():
     deleted_excess = 0
     for puuid in valid_puuids:
         matches = list(db.matches_raw.find({"puuid": puuid}).sort("timestamp", -1))
-        if len(matches) > 50:
-            to_remove = matches[50:]
+        if len(matches) > 200:
+            to_remove = matches[200:]
             ids = [m["_id"] for m in to_remove]
             db.matches_raw.delete_many({"_id": {"$in": ids}})
             deleted_excess += len(ids)
 
         c_matches = list(db.matches_clean.find({"puuid": puuid}).sort("game_timestamp", -1))
-        if len(c_matches) > 50:
-            c_to_remove = c_matches[50:]
+        if len(c_matches) > 200:
+            c_to_remove = c_matches[200:]
             c_ids = [m["_id"] for m in c_to_remove]
             db.matches_clean.delete_many({"_id": {"$in": c_ids}})
 
@@ -182,9 +186,30 @@ def nuke_database():
 
 @app.get("/refresh")
 def force_refresh():
+    """
+    SPLIT THE JOB: Gets all users and pushes individual tasks to Redis.
+    This allows multiple extractors to pick them up simultaneously.
+    """
     try:
-        requests.get("http://extractor:8000/trigger_extract?count=50", timeout=1)
-        return {"status": "Update Signal Sent"}
+        # 1. Get all user PUUIDs
+        users = list(db.summoners.find({}, {"puuid": 1, "summonerName": 1}))
+
+        if not users:
+            return {"status": "No users to refresh"}
+
+        count = 0
+        # 2. Create a separate task for each user
+        for u in users:
+            payload = {
+                "action": "extract",
+                "puuid": u["puuid"],
+                "limit": 200  # Request 200 games per user
+            }
+            redis_client.lpush("extraction_queue", json.dumps(payload))
+            count += 1
+
+        return {"status": f"🚀 Distributed {count} tasks to Queue (Limit 200)"}
+
     except Exception as e:
         return {"status": "Error", "detail": str(e)}
 
@@ -204,8 +229,6 @@ def get_stats(summoner: str):
     if not summ:
         summ = db.summoners.find_one(query)
 
-    # This returns 200 OK, but with {"error": ...} in the body.
-    # The frontend sees this and triggers the Auto-Add.
     if not summ: return {"error": "not found"}
 
     puuid = summ.get("puuid")
@@ -213,7 +236,7 @@ def get_stats(summoner: str):
     matches = list(
         db.matches_clean.find({"puuid": puuid}, {"_id": 0})
         .sort([("game_timestamp", -1)])
-        .limit(50)
+        .limit(200)
     )
 
     agg_dict = {}
