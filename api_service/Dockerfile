@@ -2,6 +2,8 @@ FROM python:3.11-alpine
 
 WORKDIR /app
 
+RUN apk add --no-cache tzdata
+
 RUN pip install --no-cache-dir fastapi uvicorn pymongo python-dotenv requests redis>=5.0.0
 
 COPY . .

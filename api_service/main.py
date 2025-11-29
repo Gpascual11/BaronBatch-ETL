@@ -14,7 +14,6 @@ RIOT_API_KEY = os.getenv("RIOT_API_KEY")
 mongo = MongoClient("mongodb://db:27017", serverSelectionTimeoutMS=3000)
 db = mongo["riot"]
 
-# --- REDIS CONNECTION ---
 redis_client = redis.Redis(host='redis', port=6379, db=0, decode_responses=True)
 
 app = FastAPI()
@@ -25,6 +24,16 @@ class SummonerRequest(BaseModel):
 
 
 def get_routing_info(tag):
+    """
+    Determines the routing region based on the tag line.
+    Defaults to Europe (EUW1) if not specified.
+
+    Args:
+        tag (str): The tag line (e.g., "EUW", "KR1").
+
+    Returns:
+        tuple: (region_routing, platform_id).
+    """
     tag = tag.upper()
     if tag == "KR1": return "asia", "kr"
     if tag == "NA1": return "americas", "na1"
@@ -32,25 +41,49 @@ def get_routing_info(tag):
 
 
 def check_db():
+    """
+    Health check for MongoDB connection.
+
+    Returns:
+        bool: True if DB is reachable, False otherwise.
+    """
     try:
         mongo.admin.command('ping')
         return True
-    except:
+    except Exception:
         return False
 
 
 @app.get("/summoners")
 def get_summoners_list():
+    """
+    Retrieves a list of all tracked summoners from the database.
+
+    Returns:
+        list: Sorted list of unique summoner names (Name#Tag).
+    """
     if not check_db(): return []
     try:
         summoners = list(db.summoners.find({}, {"summonerName": 1, "_id": 0}))
         return sorted(list(set([s["summonerName"] for s in summoners])))
-    except:
+    except Exception:
         return []
 
 
 @app.post("/add_summoner")
 def add_summoner(request: SummonerRequest):
+    """
+    Adds a new summoner to the tracking list.
+    1. Verifies existence via Riot Account API.
+    2. Saves basic info to MongoDB.
+    3. Queues extraction tasks in Redis (split into batches of 50 to avoid rate limits).
+
+    Args:
+        request (SummonerRequest): Contains 'name_tag' (Name#Tag).
+
+    Returns:
+        dict: Success message and corrected name.
+    """
     if not check_db(): raise HTTPException(503, "DB Loading...")
 
     full_name = request.name_tag
@@ -65,7 +98,7 @@ def add_summoner(request: SummonerRequest):
 
     try:
         r = requests.get(acc_url, timeout=5)
-    except:
+    except Exception:
         raise HTTPException(504, "Timeout contacting Riot API")
 
     if r.status_code == 404: raise HTTPException(404, "Player not found (Check spelling)")
@@ -85,44 +118,35 @@ def add_summoner(request: SummonerRequest):
     db.summoners.update_one({"puuid": puuid}, {"$set": update_data}, upsert=True)
 
     try:
-        # SPLIT INTO 4 TASKS OF 50 (Total 200)
-        # This keeps us under the 100 request/2min limit per key per batch
+        BATCH_SIZE = 50
+        TOTAL_GAMES = 200
 
-        # Batch 1: 0-50 (+ Profile Update)
-        redis_client.lpush("extraction_queue", json.dumps({
-            "action": "extract_batch", "puuid": puuid,
-            "start": 0, "count": 50, "update_profile": True
-        }))
-
-        # Batch 2: 50-100
-        redis_client.lpush("extraction_queue", json.dumps({
-            "action": "extract_batch", "puuid": puuid,
-            "start": 50, "count": 50, "update_profile": False
-        }))
-
-        # Batch 3: 100-150
-        redis_client.lpush("extraction_queue", json.dumps({
-            "action": "extract_batch", "puuid": puuid,
-            "start": 100, "count": 50, "update_profile": False
-        }))
-
-        # Batch 4: 150-200
-        redis_client.lpush("extraction_queue", json.dumps({
-            "action": "extract_batch", "puuid": puuid,
-            "start": 150, "count": 50, "update_profile": False
-        }))
+        for start in range(0, TOTAL_GAMES, BATCH_SIZE):
+            redis_client.lpush("extraction_queue", json.dumps({
+                "action": "extract_batch",
+                "puuid": puuid,
+                "start": start,
+                "count": BATCH_SIZE,
+                "update_profile": (start == 0)  # Only update profile on first batch
+            }))
 
     except Exception as e:
-        print(f"⚠️ Redis Error: {e}")
+        print(f"⚠ Redis Error: {e}")
 
     return {
-        "message": f"✅ {real_name} added! Queued 4 batches (200 games).",
+        "message": f"{real_name} added! Queued parallel extraction ({TOTAL_GAMES} games).",
         "correct_name": real_name
     }
 
 
 @app.delete("/summoner/{name_tag}")
 def delete_summoner(name_tag: str):
+    """
+    Removes a summoner and all associated data (raw matches, clean matches, stats) from the DB.
+
+    Args:
+        name_tag (str): The summoner name to delete.
+    """
     if not check_db(): raise HTTPException(503, "DB Down")
 
     clean_search = name_tag.replace(" ", "")
@@ -144,16 +168,26 @@ def delete_summoner(name_tag: str):
     db.matches_clean.delete_many({"puuid": puuid})
     db.aggregated_stats.delete_many({"puuid": puuid})
 
-    return {"message": f"🗑️ Deleted {name} and all data."}
+    return {"message": f"Deleted {name} and all data."}
 
 
 @app.delete("/maintenance/cleanup")
 def cleanup_data():
+    """
+    Performs database maintenance:
+    1. Removes 'orphan' matches (matches where the user is no longer tracked).
+    2. Removes duplicate raw matches.
+    3. Trims match history to keep only the latest 200 games per user to save space.
+
+    Returns:
+        dict: Summary of deleted records.
+    """
     if not check_db(): raise HTTPException(503, "DB Down")
 
     valid_puuids = [s["puuid"] for s in db.summoners.find({}, {"puuid": 1})]
     raw_res = db.matches_raw.delete_many({"puuid": {"$nin": valid_puuids}})
-    clean_res = db.matches_clean.delete_many({"puuid": {"$nin": valid_puuids}})
+    # Unused variable clean_res kept for logic completeness, though not returned
+    _clean_res = db.matches_clean.delete_many({"puuid": {"$nin": valid_puuids}})
 
     pipeline = [
         {"$group": {"_id": "$matchId", "ids": {"$push": "$_id"}, "count": {"$sum": 1}}},
@@ -183,7 +217,7 @@ def cleanup_data():
 
     try:
         db.matches_raw.create_index("matchId", unique=True)
-    except:
+    except Exception:
         pass
 
     return {
@@ -196,55 +230,57 @@ def cleanup_data():
 
 @app.delete("/maintenance/nuke")
 def nuke_database():
+    """
+    DANGER: Deletes ALL data in the database (Users, Matches, Stats).
+    Used for factory resets.
+    """
     if not check_db(): raise HTTPException(503, "DB Down")
     db.summoners.delete_many({})
     db.matches_raw.delete_many({})
     db.matches_clean.delete_many({})
     db.aggregated_stats.delete_many({})
-    return {"message": "💥 Database completely wiped. Ready for fresh start."}
+    return {"message": "Database completely wiped. Ready for fresh start."}
 
 
 @app.get("/refresh")
 def force_refresh():
     """
-    SPLIT THE JOB: Gets all users and pushes individual tasks to Redis.
-    This allows multiple extractors to pick them up simultaneously.
+    Triggers a manual refresh for ALL tracked users.
+    Distributes tasks to Redis in batches of 50 to allow multiple extractors
+    to process them in parallel without hitting rate limits.
     """
     try:
-        # 1. Get all user PUUIDs
         users = list(db.summoners.find({}, {"puuid": 1, "summonerName": 1}))
 
         if not users:
             return {"status": "No users to refresh"}
 
         count = 0
-        # 2. Create a separate task for each user
-        for u in users:
-            # Batch 1 (0-100 + Profile)
-            redis_client.lpush("extraction_queue", json.dumps({
-                "action": "extract_batch",
-                "puuid": u["puuid"],
-                "start": 0,
-                "count": 100,
-                "update_profile": True
-            }))
-            # Batch 2 (100-200)
-            redis_client.lpush("extraction_queue", json.dumps({
-                "action": "extract_batch",
-                "puuid": u["puuid"],
-                "start": 100,
-                "count": 100,
-                "update_profile": False
-            }))
-            count += 2
+        BATCH_SIZE = 50
+        LIMIT_TO_REFRESH = 100
 
-        return {"status": f"🚀 Distributed {count} batch tasks to Queue"}
+        for u in users:
+            for start in range(0, LIMIT_TO_REFRESH, BATCH_SIZE):
+                redis_client.lpush("extraction_queue", json.dumps({
+                    "action": "extract_batch",
+                    "puuid": u["puuid"],
+                    "start": start,
+                    "count": BATCH_SIZE,
+                    "update_profile": (start == 0)
+                }))
+                count += 1
+
+        return {"status": f"Distributed {count} batch tasks to Queue"}
     except Exception as e:
         return {"status": "Error", "detail": str(e)}
 
 
 @app.get("/stats/{summoner}")
 def get_stats(summoner: str):
+    """
+    Returns the aggregated dashboard data for a specific summoner.
+    Includes Profile, Rank, Recent Matches, and Champion Stats.
+    """
     if not check_db(): raise HTTPException(503, "DB Down")
 
     clean_search = summoner.replace(" ", "")
@@ -262,7 +298,6 @@ def get_stats(summoner: str):
 
     puuid = summ.get("puuid")
 
-    # INCREASE LIMIT TO 300 to show all fetched games
     matches = list(
         db.matches_clean.find({"puuid": puuid}, {"_id": 0})
         .sort([("game_timestamp", -1)])

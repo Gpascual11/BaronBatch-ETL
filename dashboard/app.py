@@ -1,7 +1,6 @@
 import streamlit as st
 import requests
 import pandas as pd
-import matplotlib.pyplot as plt
 from dotenv import load_dotenv
 import os
 import urllib.parse
@@ -14,12 +13,19 @@ API_URL = os.getenv("API_URL", "http://api_service:8000")
 st.set_page_config(page_title="LoL Pro Grid", layout="wide")
 
 
-# --- ASSETS ---
 @st.cache_data
 def get_ddragon_version():
+    """
+    Fetches the latest Data Dragon version to ensure image assets (items, icons)
+    are up-to-date with the current LoL patch.
+    Falls back to a safe default if the request fails.
+
+    Returns:
+        str: Version string (e.g., "14.23.1").
+    """
     try:
         return requests.get("https://ddragon.leagueoflegends.com/api/versions.json", timeout=3).json()[0]
-    except:
+    except Exception:
         return "14.23.1"
 
 
@@ -27,43 +33,69 @@ VER = get_ddragon_version()
 
 
 def get_champ_img(name):
+    """
+    Returns the CDN URL for a champion's square asset.
+    """
     if not name: return "https://cdn.communitydragon.org/latest/champion/unknown/square"
     return f"https://cdn.communitydragon.org/latest/champion/{name}/square"
 
 
 def get_profile_icon(icon_id):
+    """
+    Returns the CDN URL for a summoner profile icon.
+    """
     if not icon_id: icon_id = 29
     return f"https://ddragon.leagueoflegends.com/cdn/{VER}/img/profileicon/{icon_id}.png"
 
 
 def get_item_img(item_id):
+    """
+    Returns the CDN URL for an in-game item. Returns a transparent pixel if 0 (empty slot).
+    """
     if not item_id or item_id == 0: return "https://upload.wikimedia.org/wikipedia/commons/c/ca/1x1.png"
     return f"https://ddragon.leagueoflegends.com/cdn/{VER}/img/item/{item_id}.png"
 
 
 def get_rank_emblem(tier):
+    """
+    Returns the CDN URL for the rank emblem corresponding to the tier (e.g., DIAMOND, GOLD).
+    """
     if not tier or tier == "UNRANKED":
         return "https://raw.communitydragon.org/latest/plugins/rcp-fe-lol-static-assets/global/default/images/ranked-emblem/emblem-unranked.png"
     return f"https://raw.communitydragon.org/latest/plugins/rcp-fe-lol-static-assets/global/default/images/ranked-emblem/emblem-{tier.lower()}.png"
 
 
 def get_queue_name(qid):
+    """
+    Maps Riot Queue IDs to human-readable names.
+    """
     queues = {420: "Ranked Solo", 440: "Ranked Flex", 450: "ARAM", 490: "Quickplay", 1700: "Arena", 1900: "URF"}
     return queues.get(qid, f"Queue {qid}")
 
 
-# --- STATE ---
 if 'current_user' not in st.session_state: st.session_state['current_user'] = None
 
 
 def get_summoners():
+    """
+    API Wrapper: Fetches the list of all tracked summoners.
+    """
     try:
         return requests.get(f"{API_URL}/summoners", timeout=3).json()
-    except:
+    except Exception:
         return []
 
 
 def try_add_summoner(name):
+    """
+    API Wrapper: Sends a request to track a new summoner.
+
+    Args:
+        name (str): The Name#Tag to add.
+
+    Returns:
+        tuple: (success (bool), response_json_or_error (dict|str))
+    """
     try:
         r = requests.post(f"{API_URL}/add_summoner", json={"name_tag": name}, timeout=30)
         if r.status_code == 200:
@@ -75,23 +107,32 @@ def try_add_summoner(name):
 
 
 def trigger_refresh():
+    """
+    API Wrapper: Triggers the global data refresh job.
+    """
     try:
         requests.get(f"{API_URL}/refresh", timeout=2)
         return True
-    except:
+    except Exception:
         return False
 
 
 def delete_user(name):
+    """
+    API Wrapper: Deletes a user and their data.
+    """
     try:
         safe = urllib.parse.quote(name)
         r = requests.delete(f"{API_URL}/summoner/{safe}", timeout=5)
         return r.status_code == 200
-    except:
+    except Exception:
         return False
 
 
 def trigger_cleanup():
+    """
+    API Wrapper: Triggers database maintenance (orphan removal, duplicate check).
+    """
     try:
         r = requests.delete(f"{API_URL}/maintenance/cleanup", timeout=30)
         if r.status_code == 200:
@@ -101,16 +142,17 @@ def trigger_cleanup():
         return False, str(e)
 
 
-# --- NEW NUKE REQUEST ---
 def trigger_nuke():
+    """
+    API Wrapper: Triggers a complete factory reset of the database.
+    """
     try:
         r = requests.delete(f"{API_URL}/maintenance/nuke", timeout=5)
         return r.status_code == 200
-    except:
+    except Exception:
         return False
 
 
-# --- SIDEBAR ---
 with st.sidebar:
     st.title("🎮 LoL Pro")
     st.caption(f"Patch: {VER}")
@@ -175,7 +217,6 @@ with st.sidebar:
                 else:
                     st.error("Reset Failed")
 
-# --- MAIN ---
 st.write("")
 c1, c2 = st.columns([4, 1])
 with c1:
@@ -224,7 +265,6 @@ total_wins = sum(1 for m in matches if m['win'])
 general_wr = (total_wins / total_games * 100) if total_games > 0 else 0
 wr_color = "#5383e8" if general_wr >= 50 else "#e84057"
 
-# --- HEADER ---
 c_prof, c_inf, c_rank = st.columns([1, 3, 2])
 with c_prof:
     icon_id_raw = res.get('profile_icon', 29)
@@ -279,28 +319,23 @@ with c_rank:
 
 st.markdown("---")
 
-# --- CUSTOM CSS STYLING ---
 st.markdown("""
 <style>
-    /* Importar fuente estilo Gaming (Oswald) */
     @import url('https://fonts.googleapis.com/css2?family=Oswald:wght@300;400;700&display=swap');
 
     html, body, [class*="css"]  {
         font-family: 'Oswald', sans-serif;
     }
 
-    /* Fondo general con un degradado sutil */
     .stApp {
         background: linear-gradient(180deg, #091428 0%, #040810 100%);
     }
 
-    /* Sidebar más oscura y con borde dorado sutil */
     [data-testid="stSidebar"] {
         background-color: #0a0a0c;
         border-right: 1px solid #333;
     }
 
-    /* Títulos y Encabezados */
     h1, h2, h3 {
         color: #f0e6d2 !important;
         text-transform: uppercase;
@@ -308,7 +343,6 @@ st.markdown("""
         text-shadow: 0 0 10px rgba(212, 175, 55, 0.3);
     }
 
-    /* Inputs de texto personalizados */
     .stTextInput input {
         background-color: #1e2328 !important;
         color: #f0e6d2 !important;
@@ -316,7 +350,6 @@ st.markdown("""
         border-radius: 4px;
     }
 
-    /* Botones primarios (Estilo Hextech) */
     .stButton button[type="primary"] {
         background: linear-gradient(45deg, #c8aa6e, #7a5c29);
         color: #000;
@@ -330,14 +363,12 @@ st.markdown("""
         transform: scale(1.02);
     }
 
-    /* Botones secundarios */
     .stButton button {
         background-color: #1e2328;
         color: #cdbe91;
         border: 1px solid #444;
     }
 
-    /* Tabs personalizadas */
     .stTabs [data-baseweb="tab-list"] {
         gap: 10px;
     }
@@ -353,7 +384,6 @@ st.markdown("""
         font-weight: bold;
     }
 
-    /* MATCH CARD STYLES (Mejorado) */
     .match-card { 
         background: rgba(20, 20, 30, 0.6); 
         backdrop-filter: blur(10px);
@@ -369,7 +399,7 @@ st.markdown("""
         background: rgba(30, 30, 40, 0.8);
     }
     .win { 
-        border-left-color: #0ac8b9; /* Cyan Hextech para victoria */
+        border-left-color: #0ac8b9; 
         background: linear-gradient(90deg, rgba(10, 200, 185, 0.1) 0%, rgba(0,0,0,0) 100%);
     }
     .loss { 
@@ -377,7 +407,6 @@ st.markdown("""
         background: linear-gradient(90deg, rgba(232, 64, 87, 0.1) 0%, rgba(0,0,0,0) 100%);
     }
 
-    /* Textos dentro de las cards */
     .kda-main { font-weight:bold; font-size:1.1em; color: #fff; letter-spacing: 1px;}
     .meta { font-size:0.75em; color:#aaa; font-family: sans-serif;}
     .item-icon { width:22px; height:22px; border-radius:3px; border:1px solid #444; box-shadow: 0 0 5px rgba(0,0,0,0.5);}
@@ -391,7 +420,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-tab_hist, tab_stats = st.tabs(["📜 Match History", "🏆 Stats"])
+tab_hist, tab_stats = st.tabs(["Match History", "Stats"])
 
 with tab_hist:
     t_all, t_solo, t_flex, t_aram = st.tabs(["All", "SoloQ", "Flex", "ARAM"])

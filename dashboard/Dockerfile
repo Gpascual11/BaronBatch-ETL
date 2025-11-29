@@ -2,7 +2,9 @@ FROM python:3.11-alpine
 
 WORKDIR /app
 
-RUN pip install --no-cache-dir streamlit requests pandas python-dotenv matplotlib
+RUN apk add --no-cache tzdata
+
+RUN pip install --no-cache-dir streamlit requests pandas python-dotenv
 
 COPY . .
 

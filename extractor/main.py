@@ -3,7 +3,7 @@ import requests
 from pymongo import MongoClient
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 from apscheduler.schedulers.background import BackgroundScheduler
 from contextlib import asynccontextmanager
@@ -15,7 +15,6 @@ from urllib.parse import quote
 
 load_dotenv()
 
-# --- FIX: STRIP KEY ---
 RIOT_API_KEY = os.getenv("RIOT_API_KEY", "").strip()
 
 mongo = MongoClient("mongodb://db:27017")
@@ -34,11 +33,28 @@ PLATFORM_TO_REGION = {
 
 
 def log(msg):
+    """
+    Logs a message to stdout and flushes the buffer to ensure immediate output
+    in Docker logs.
+
+    Args:
+        msg (str): The message to log.
+    """
     print(msg)
     sys.stdout.flush()
 
 
 def riot_get(url, timeout=10):
+    """
+    Performs a GET request to the Riot API with error handling and rate limit retries.
+
+    Args:
+        url (str): The Riot API URL to request.
+        timeout (int, optional): Request timeout in seconds. Defaults to 10.
+
+    Returns:
+        dict | list | None: The JSON response if successful, otherwise None.
+    """
     try:
         r = requests.get(url, timeout=timeout)
         if r.status_code == 429:
@@ -47,30 +63,33 @@ def riot_get(url, timeout=10):
             return riot_get(url, timeout)
         if r.status_code == 200: return r.json()
 
-        # --- DEBUG: PRINT RESPONSE BODY ---
         if r.status_code >= 400:
-            log(f"⚠️ API Error {r.status_code}: {url}")
+            log(f"⚠ API Error {r.status_code}: {url}")
             try:
                 log(f"   Reason: {r.text}")
-            except:
+            except Exception:
                 pass
 
     except Exception as e:
-        log(f"⚠️ Request Exception: {e}")
+        log(f"⚠ Request Exception: {e}")
     return None
 
 
 def get_region_and_platform(name_tag, db_region=None):
     """
-    Returns (Platform, Region)
-    Prioritizes DB stored region if available.
+    Determines the routing values (Platform and Region) for a summoner.
+    Prioritizes DB stored region if available, otherwise infers from the tag line.
+
+    Args:
+        name_tag (str): The full Summoner Name (Name#Tag).
+        db_region (str, optional): The region currently stored in the DB.
+
+    Returns:
+        tuple: A tuple containing (platform_id, region_routing).
+               Example: ("euw1", "europe").
     """
     # 1. Use DB info if available (Auto-Discovery result)
     if db_region and db_region in PLATFORM_TO_REGION.values():
-        # Heuristic: If DB says 'americas', default to 'na1'. If 'europe', default 'euw1'
-        # This isn't perfect for platform (e.g. EUW vs EUNE) but Match-V5 only cares about Region.
-        # For Summoner-V4 (Platform specific), we might need to store platform too.
-        # For now, let's trust the input tag if it matches the region, otherwise default.
         if db_region == "europe": return "euw1", "europe"
         if db_region == "americas": return "na1", "americas"
         if db_region == "asia": return "kr", "asia"
@@ -94,41 +113,80 @@ def get_region_and_platform(name_tag, db_region=None):
     if tag == "LAS": return "la2", "americas"
     if tag == "OCE": return "oc1", "sea"
 
-    return "euw1", "europe"  # Default
+    return "euw1", "europe"
 
 
 def auto_detect_correct_region(puuid, current_platform):
     """
-    If EUW fails, try ALL other platforms to find the user.
-    Returns: (new_platform, new_region) or None
-    """
-    log(f"🕵️ Auto-detecting region for PUUID {puuid[:10]}...")
+    Attempts to find a user across all supported platforms if the default platform fails.
+    If found, updates the database with the correct region and platform.
 
-    # List of platforms to probe (exclude the one we already tried)
+    Args:
+        puuid (str): The user's PUUID.
+        current_platform (str): The platform ID that failed.
+
+    Returns:
+        tuple: (new_platform, new_region) if found, otherwise (None, None).
+    """
+    log(f"Auto-detecting region for PUUID {puuid[:10]}...")
+
     platforms_to_try = [p for p in PLATFORM_TO_REGION.keys() if p != current_platform]
 
     for plt in platforms_to_try:
         url = f"https://{plt}.api.riotgames.com/lol/summoner/v4/summoners/by-puuid/{puuid}?api_key={RIOT_API_KEY}"
-        # We use requests directly to avoid logging 400 errors during probing
         try:
             r = requests.get(url, timeout=5)
             if r.status_code == 200:
                 new_reg = PLATFORM_TO_REGION[plt]
-                log(f"✅ Found user on {plt} ({new_reg})!")
-                # Update DB immediately
+                log(f"Found user on {plt} ({new_reg})!")
                 db.summoners.update_one({"puuid": puuid}, {"$set": {"region": new_reg, "platform": plt}})
                 return plt, new_reg
-        except:
+        except Exception:
             pass
-        time.sleep(0.1)  # Be nice
+        time.sleep(0.1)
 
-    log("❌ Could not find user on ANY region.")
+    log("Could not find user on ANY region.")
     return None, None
 
 
-# In extractor/main.py
+def get_local_puuid(name, tag):
+    """
+    Resolves the PUUID for a given Name#Tag using the current API Key.
+    This is used to handle '400 Exception Decrypting' errors caused by key rotation
+    or multiple applications.
+
+    Args:
+        name (str): The Game Name.
+        tag (str): The Tag Line.
+
+    Returns:
+        str | None: The PUUID valid for the current API key, or None if failed.
+    """
+    log(f"Translating PUUID for {name}#{tag} to match current API Key...")
+
+    safe_name = quote(name)
+    safe_tag = quote(tag)
+    url = f"https://europe.api.riotgames.com/riot/account/v1/accounts/by-riot-id/{safe_name}/{safe_tag}?api_key={RIOT_API_KEY}"
+
+    data = riot_get(url)
+    if data and "puuid" in data:
+        return data["puuid"]
+    return None
+
 
 def update_basic_summoner_info(puuid, platform, name):
+    """
+    Updates the summoner's basic profile information (level, icon, encrypted ID) in the DB.
+    Handles automatic region detection and key mismatch scenarios.
+
+    Args:
+        puuid (str): The PUUID currently stored in the DB.
+        platform (str): The platform ID (e.g., 'euw1').
+        name (str): The summoner's full name (for logging/recovery).
+
+    Returns:
+        tuple: (success (bool), encrypted_summoner_id (str|None)).
+    """
     url = f"https://{platform}.api.riotgames.com/lol/summoner/v4/summoners/by-puuid/{puuid}?api_key={RIOT_API_KEY}"
 
     # 1. Try Standard Request
@@ -138,20 +196,19 @@ def update_basic_summoner_info(puuid, platform, name):
     if r.status_code == 400 and "Exception decrypting" in r.text:
         log(f"⚠️ Profile Key Mismatch for {name}. Fetching local ID...")
 
-        # Extract Name/Tag from "Name#Tag"
         if "#" in name:
             g_name, t_line = name.split("#")
         else:
             g_name, t_line = name, "EUW"
 
-        local_puuid = get_local_puuid(puuid, g_name, t_line)
+        # Fixed call signature (removed puuid)
+        local_puuid = get_local_puuid(g_name, t_line)
 
         if local_puuid:
-            # Retry with correct Local PUUID
             url = f"https://{platform}.api.riotgames.com/lol/summoner/v4/summoners/by-puuid/{local_puuid}?api_key={RIOT_API_KEY}"
             r = requests.get(url)
 
-    # 3. Handle Auto-Detect (Only if it's NOT a decryption error)
+    # 3. Handle Auto-Detect
     if r.status_code == 404:
         new_plt, new_reg = auto_detect_correct_region(puuid, platform)
         if new_plt:
@@ -166,9 +223,7 @@ def update_basic_summoner_info(puuid, platform, name):
             "profileIconId": data.get("profileIconId", 29),
             # Important: We do NOT update 'encryptedSummonerId' here because
             # it might be encrypted for Key #2, but we want the DB to look like Key #1.
-            # However, for 'fetch_rank' to work in this specific container, we return the ID.
         }
-        # Only update DB non-sensitive fields
         db.summoners.update_one({"puuid": puuid}, {"$set": update_data})
         return True, data.get("id")
 
@@ -176,9 +231,19 @@ def update_basic_summoner_info(puuid, platform, name):
 
 
 def update_db_rank_data(puuid, solo_data):
+    """
+    Updates the summoner's Ranked Solo queue statistics in the database.
+
+    Args:
+        puuid (str): The summoner's PUUID.
+        solo_data (dict): The dictionary containing rank information from Riot API.
+
+    Returns:
+        bool: Always True.
+    """
     if not solo_data: solo_data = {}
     rank_data = {
-        "last_rank_update": datetime.utcnow(),
+        "last_rank_update": datetime.now(timezone.utc),
         "solo_tier": solo_data.get('tier', "UNRANKED"),
         "solo_rank": solo_data.get('rank', ""),
         "solo_lp": solo_data.get('leaguePoints', 0),
@@ -188,11 +253,23 @@ def update_db_rank_data(puuid, solo_data):
     db.summoners.update_one({"puuid": puuid}, {"$set": rank_data})
     if solo_data.get('tier'):
         rank_display = f"{solo_data.get('tier')} {solo_data.get('rank', '')}"
-        log(f"🏅 RANG OK: {rank_display}")
+        log(f"RANK OK: {rank_display}")
     return True
 
 
-def fetch_and_update_rank_fast(enc_id, platform, puuid, name):
+def fetch_and_update_rank_fast(enc_id, platform, puuid, _name):
+    """
+    Attempts to fetch rank data using the encrypted summoner ID (League-V4 endpoint).
+
+    Args:
+        enc_id (str): The Encrypted Summoner ID.
+        platform (str): The platform ID (e.g., 'euw1').
+        puuid (str): The summoner's PUUID.
+        _name (str): Unused parameter (name).
+
+    Returns:
+        bool: True if data was found and updated, False otherwise.
+    """
     league_url = f"https://{platform}.api.riotgames.com/lol/league/v4/entries/by-summoner/{enc_id}?api_key={RIOT_API_KEY}"
     data = riot_get(league_url)
     if data is not None:
@@ -202,6 +279,18 @@ def fetch_and_update_rank_fast(enc_id, platform, puuid, name):
 
 
 def fetch_rank_advanced(puuid, platform, name):
+    """
+    Fallback method to find high-elo players by iterating through Challenger/GM/Master lists
+    if the direct lookup fails.
+
+    Args:
+        puuid (str): The summoner's PUUID.
+        platform (str): The platform ID.
+        name (str): The summoner's name.
+
+    Returns:
+        bool: Always True.
+    """
     tiers_high_elo = ["CHALLENGER", "GRANDMASTER", "MASTER"]
     for tier in tiers_high_elo:
         url = f"https://{platform}.api.riotgames.com/lol/league/v4/{tier.lower()}leagues/by-queue/RANKED_SOLO_5x5?api_key={RIOT_API_KEY}"
@@ -223,36 +312,28 @@ def fetch_rank_advanced(puuid, platform, name):
                         'losses': entry.get('losses', 0)
                     }
                     update_db_rank_data(puuid, update_data)
-                    log(f"🎉 FOUND in {tier}: {name}")
+                    log(f"FOUND in {tier}: {name}")
                     return True
     update_db_rank_data(puuid, {'tier': 'UNRANKED'})
     return True
 
 
 # --- BATCH LOGIC ---
-def get_local_puuid(original_puuid, name, tag):
-    """
-    Helper: If the API Key cannot decrypt the PUUID (400 Error),
-    we resolve the name again to get a PUUID valid for THIS API Key.
-    """
-    log(f"🔄 Translating PUUID for {name}#{tag} to match current API Key...")
-
-    # 1. Use Account V1 to get the PUUID valid for this specific container's Key
-    safe_name = quote(name)
-    safe_tag = quote(tag)
-    url = f"https://europe.api.riotgames.com/riot/account/v1/accounts/by-riot-id/{safe_name}/{safe_tag}?api_key={RIOT_API_KEY}"
-
-    data = riot_get(url)
-    if data and "puuid" in data:
-        return data["puuid"]
-    return None
-
-
 def run_batch_extraction(puuid, start, count, update_profile=False):
+    """
+    Executes the core extraction logic for a specific batch of matches.
+    Handles profile updates, PUUID translation (Key Mismatch), and downloading match data.
+
+    Args:
+        puuid (str): The DB PUUID (Master PUUID) of the user.
+        start (int): The match history start index.
+        count (int): The number of matches to fetch.
+        update_profile (bool, optional): Whether to also update summoner profile/rank. Defaults to False.
+    """
     # 1. Get Basic Info from DB using the ORIGINAL PUUID (DB Key)
     summ = db.summoners.find_one({"puuid": puuid})
     if not summ:
-        log(f"❌ User not found in DB: {puuid}")
+        log(f"User not found in DB: {puuid}")
         return
 
     full_name = summ.get("summonerName", "Unknown#Unknown")
@@ -261,7 +342,6 @@ def run_batch_extraction(puuid, start, count, update_profile=False):
     else:
         game_name, tag_line = full_name, "EUW"
 
-    # Use stored region/platform if available, else infer
     db_region = summ.get("region")
     db_platform = summ.get("platform")
 
@@ -271,57 +351,58 @@ def run_batch_extraction(puuid, start, count, update_profile=False):
         platform, region = get_region_and_platform(full_name)
 
     # --- PUUID CONTEXT SWITCHING ---
-    # We use 'working_puuid' for API calls, but 'puuid' (original) for DB storage
     working_puuid = puuid
 
     # 2. Update Profile & Rank (ONLY IF REQUESTED)
     if update_profile:
-        log(f"👤 Checking Profile: {full_name}")
-        # Note: update_basic_summoner_info might fail if PUUID doesn't match key
-        # We try; if it fails, we catch it later or logic handles it.
+        log(f"Checking Profile: {full_name}")
         is_ok, fetched_id = update_basic_summoner_info(puuid, platform, full_name)
 
-        # If is_ok is False, it might be the key mismatch.
-        # But let's rely on the Match-V5 call to trigger the "400" check.
+        # Refetch just in case region changed
+        summ = db.summoners.find_one({"puuid": puuid})
+        if summ.get("platform"): platform = summ.get("platform")
+
+        saved_id = summ.get("encryptedSummonerId") or fetched_id
+
+        rank_updated = False
+        if saved_id: rank_updated = fetch_and_update_rank_fast(saved_id, platform, puuid, full_name)
+        if not rank_updated: fetch_rank_advanced(puuid, platform, full_name)
 
     # 3. Fetch Matches (Specific Batch)
-    log(f"📥 {full_name}: Fetching batch {start}-{start + count} (Region: {region})...")
+    log(f"{full_name}: Fetching batch {start}-{start + count} (Region: {region})...")
 
     ids_url = f"https://{region}.api.riotgames.com/lol/match/v5/matches/by-puuid/{working_puuid}/ids?start={start}&count={count}&api_key={RIOT_API_KEY}"
 
-    # --- HERE IS THE FIX LOGIC ---
     try:
         r = requests.get(ids_url, timeout=10)
 
         # CATCH THE KEY MISMATCH HERE
         if r.status_code == 400 and "Exception decrypting" in r.text:
-            log(f"⚠️ Key Mismatch detected for {full_name}. Resolving local PUUID...")
-            new_local_puuid = get_local_puuid(puuid, game_name, tag_line)
+            log(f"Key Mismatch detected for {full_name}. Resolving local PUUID...")
+            # Fixed call signature (removed puuid)
+            new_local_puuid = get_local_puuid(game_name, tag_line)
 
             if new_local_puuid:
                 working_puuid = new_local_puuid
-                # Retry with new working_puuid
                 ids_url = f"https://{region}.api.riotgames.com/lol/match/v5/matches/by-puuid/{working_puuid}/ids?start={start}&count={count}&api_key={RIOT_API_KEY}"
                 r = requests.get(ids_url, timeout=10)
             else:
-                log("❌ Failed to resolve local PUUID. Aborting batch.")
+                log("Failed to resolve local PUUID. Aborting batch.")
                 return
 
-        # Handle Rate limits
         if r.status_code == 429:
             log("⏳ Rate Limit (429). Sleeping 2min...")
             time.sleep(120)
-            # Recursive retry
             return run_batch_extraction(puuid, start, count, update_profile)
 
         if r.status_code != 200:
-            log(f"⚠️ Match fetch failed: {r.status_code}")
+            log(f"⚠ Match fetch failed: {r.status_code}")
             return
 
         match_ids = r.json()
 
     except Exception as e:
-        log(f"⚠️ Request Exception: {e}")
+        log(f"⚠ Request Exception: {e}")
         return
 
     if not match_ids or not isinstance(match_ids, list):
@@ -329,7 +410,6 @@ def run_batch_extraction(puuid, start, count, update_profile=False):
 
     new_in_batch = 0
     for match_id in match_ids:
-        # Check if match exists
         exists = db.matches_raw.find_one({"matchId": match_id})
         if exists: continue
 
@@ -338,41 +418,60 @@ def run_batch_extraction(puuid, start, count, update_profile=False):
 
         if data:
             try:
-                # IMPORTANT: We save using 'puuid' (The Original from DB)
-                # NOT 'working_puuid' (The temporary one for this Key)
-                # This ensures your Dashboard sees the matches under the correct user.
+                # SAVE WITH ORIGINAL PUUID
                 db.matches_raw.insert_one({
                     "matchId": match_id,
-                    "puuid": puuid,  # <--- Original PUUID from MongoDB
+                    "puuid": puuid,
                     "raw": data,
                     "processed": False,
-                    "timestamp": datetime.utcnow()
+                    "timestamp": datetime.now(timezone.utc)
                 })
                 new_in_batch += 1
-            except:
+            except Exception:
                 pass
             time.sleep(0.1)
 
     if new_in_batch > 0:
-        log(f"✅ {full_name}: Downloaded {new_in_batch} new matches (Batch {start}) via Extractor")
+        log(f"{full_name}: Downloaded {new_in_batch} new matches (Batch {start}) via Extractor")
 
 
-def run_extraction_job(limit=100):
-    """Fallback for scheduled jobs (Auto-Update)"""
-    users = list(db.summoners.find({}, {"puuid": 1}))
+def run_extraction_job(limit=100, target_puuid=None):
+    """
+    Scheduled job creator. Finds users in the DB and pushes extraction tasks to Redis.
+    Splits larger limits into chunks of 50 to respect rate limits.
+
+    Args:
+        limit (int, optional): Total matches to check per user. Defaults to 100.
+        target_puuid (str, optional): If provided, only runs for this specific user. Defaults to None.
+    """
+    query = {"puuid": target_puuid} if target_puuid else {}
+    users = list(db.summoners.find(query, {"puuid": 1}))
+
+    # Batch size consistent with API Service to respect rate limits
+    BATCH_SIZE = 50
+
     for u in users:
-        redis_client.lpush("extraction_queue", json.dumps({
-            "action": "extract_batch",
-            "puuid": u["puuid"],
-            "start": 0,
-            "count": 100,
-            "update_profile": True
-        }))
+        # Loop through the limit in steps of BATCH_SIZE
+        for start in range(0, limit, BATCH_SIZE):
+            current_count = min(BATCH_SIZE, limit - start)
+
+            redis_client.lpush("extraction_queue", json.dumps({
+                "action": "extract_batch",
+                "puuid": u["puuid"],
+                "start": start,
+                "count": current_count,
+                # Only update profile on the first batch
+                "update_profile": (start == 0)
+            }))
 
 
 # --- WORKER ---
 def redis_worker():
-    log("👂 Redis Worker Listening...")
+    """
+    Background worker thread that continually pulls tasks from the 'extraction_queue'
+    in Redis and executes them using run_batch_extraction.
+    """
+    log("Redis Worker Listening...")
     while True:
         try:
             _, data = redis_client.blpop("extraction_queue")
@@ -388,37 +487,45 @@ def redis_worker():
                 run_batch_extraction(puuid, start, count, update_p)
 
             elif action == "refresh_all":
-                # Handle limit from payload
                 limit = task.get("limit", 100)
                 run_extraction_job(limit)
 
         except Exception as e:
-            log(f"❌ Redis Worker Error: {e}")
+            log(f"Redis Worker Error: {e}")
             time.sleep(5)
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
-    log(f"🔑 Validating API Key: {RIOT_API_KEY[:5]}...")
+async def lifespan(_app: FastAPI):
+    """
+    Lifespan context manager for the FastAPI app.
+    Handles startup (API key validation, DB indexing, starting workers/schedulers)
+    and shutdown.
+
+    Args:
+        _app (FastAPI): The FastAPI application instance (unused).
+    """
+    log(f"Validating API Key: {RIOT_API_KEY[:5]}...")
     test_url = f"https://euw1.api.riotgames.com/lol/status/v4/platform-data?api_key={RIOT_API_KEY}"
     r = requests.get(test_url)
     if r.status_code == 200:
-        log("✅ API Key is VALID")
+        log("API Key is VALID")
     else:
-        log(f"❌ API KEY INVALID: {r.status_code} - {r.text}")
+        log(f"API KEY INVALID: {r.status_code} - {r.text}")
 
     try:
         db.matches_raw.create_index("matchId", unique=True)
-    except:
+    except Exception:
         pass
 
     threading.Thread(target=redis_worker, daemon=True).start()
 
     scheduler = BackgroundScheduler()
+    # Auto-update every 10 minutes
     scheduler.add_job(run_extraction_job, 'interval', minutes=10)
     scheduler.start()
 
-    log("🚀 Extractor Service Ready")
+    log("Extractor Service Ready")
     yield
     scheduler.shutdown()
 
@@ -427,10 +534,28 @@ app = FastAPI(lifespan=lifespan)
 
 
 @app.get("/")
-def root(): return {"status": "Extractor Running"}
+def root():
+    """
+    Health check endpoint.
+
+    Returns:
+        dict: Status message.
+    """
+    return {"status": "Extractor Running"}
 
 
 @app.get("/trigger_extract")
 def manual_trigger(background_tasks: BackgroundTasks, count: int = 50, puuid: str = None):
+    """
+    Endpoint to manually trigger an extraction job via HTTP request.
+
+    Args:
+        background_tasks (BackgroundTasks): FastAPI background task handler.
+        count (int, optional): Number of matches to extract. Defaults to 50.
+        puuid (str, optional): Target specific user. Defaults to None (all users).
+
+    Returns:
+        dict: Status message indicating job started.
+    """
     background_tasks.add_task(run_extraction_job, limit=count, target_puuid=puuid)
     return {"status": "Job started"}

@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from pymongo import MongoClient
 from dotenv import load_dotenv
-from datetime import datetime
+from datetime import datetime, timezone
 from apscheduler.schedulers.background import BackgroundScheduler
 from contextlib import asynccontextmanager
 import sys
@@ -14,12 +14,27 @@ db = mongo["riot"]
 
 
 def log(msg):
+    """
+    Logs a message to stdout and flushes the buffer.
+
+    Args:
+        msg (str): The message to log.
+    """
     print(msg)
     sys.stdout.flush()
 
 
 def get_participants_extended(participants):
-    """Extract detailed info (Items, KDA) for all 10 players"""
+    """
+    Extracts detailed statistics (Items, KDA, Damage) for all 10 players in a match.
+    Handles missing Riot IDs by falling back to Summoner Names.
+
+    Args:
+        participants (list): List of participant dictionaries from the Riot Match-V5 API.
+
+    Returns:
+        list: A list of simplified dictionaries containing key stats for each player.
+    """
     extended_list = []
     for p in participants:
         items = [p.get(f"item{i}", 0) for i in range(7)]
@@ -45,16 +60,30 @@ def get_participants_extended(participants):
 
 
 def norm(s):
-    """Normalize string: remove accents, lowercase, strip."""
+    """
+    Normalizes a string by removing accents, converting to lowercase, and stripping whitespace.
+    Essential for matching names like 'FerroiLlautó'.
+
+    Args:
+        s (str): The input string.
+
+    Returns:
+        str: The normalized string.
+    """
     return unicodedata.normalize('NFKC', s).lower().strip() if s else ""
 
 
 def run_transform_job():
+    """
+    Main ETL job. Fetches raw matches marked as 'processed: False', cleans the data,
+    computes derived stats (KDA, CS/min), and updates aggregated champion stats.
+    Includes robust fallback logic to identify users even if API keys or tags mismatch.
+    """
     # Only get unprocessed matches
     raw_matches = list(db.matches_raw.find({"processed": False}))
     if not raw_matches: return
 
-    log(f"⚙️ [AUTO] Processing {len(raw_matches)} matches...")
+    log(f"[AUTO] Processing {len(raw_matches)} matches...")
     processed_count = 0
 
     for raw in raw_matches:
@@ -69,10 +98,10 @@ def run_transform_job():
 
         all_participants = data["info"].get("participants", [])
 
-        # --- STEP 1: Try Direct PUUID Match (Works for Extractor 1) ---
+        # STEP 1: Try Direct PUUID Match (Works for Extractor 1)
         target_p = next((p for p in all_participants if p.get("puuid") == db_puuid), None)
 
-        # --- STEP 2: Fallback (Works for Extractor 2 / Key Mismatch) ---
+        # STEP 2: Fallback (Works for Extractor 2 / Key Mismatch)
         full_name = "Unknown"
         if not target_p:
             # We need to find the user by Name#Tag because the PUUID in JSON is different
@@ -106,16 +135,16 @@ def run_transform_job():
             # Enhanced Logging: Print available names to help debug why it failed
             try:
                 available = [f"{p.get('riotIdGameName')}#{p.get('riotIdTagLine')}" for p in all_participants]
-                log(f"⚠️ Could not find player {db_puuid} in match {match_id}. Skipping.")
+                log(f"⚠ Could not find player {db_puuid} in match {match_id}. Skipping.")
                 log(f"   Target: {full_name}")
                 log(f"   Available in match: {available[:3]}...")  # Log first 3 to keep it clean
-            except:
+            except Exception:
                 pass
 
             db.matches_raw.update_one({"_id": raw["_id"]}, {"$set": {"processed": True}})
             continue
 
-        # --- STANDARD EXTRACTION LOGIC ---
+        # STANDARD EXTRACTION LOGIC
         queue_id = data["info"].get("queueId", 0)
         game_ts_ms = data["info"].get("gameEndTimestamp", data["info"].get("gameCreation"))
         duration = data["info"].get("gameDuration", 1)
@@ -129,7 +158,7 @@ def run_transform_job():
 
         clean_doc = {
             "matchId": match_id,
-            "puuid": db_puuid,  # IMPORTANT: Use the DB PUUID, not the JSON PUUID
+            "puuid": db_puuid,  # IMPORTANT: Using the DB PUUID, not the JSON PUUID
             "queue_id": queue_id,
             "champion": target_p.get("championName"),
             "win": target_p.get("win"),
@@ -144,7 +173,7 @@ def run_transform_job():
             "items": items,
             "game_timestamp": game_ts_ms,
             "participants": get_participants_extended(all_participants),
-            "processed_at": datetime.utcnow()
+            "processed_at": datetime.now(timezone.utc)
         }
 
         db.matches_clean.insert_one(clean_doc)
@@ -160,15 +189,23 @@ def run_transform_job():
             upsert=True
         )
 
-    log(f"✅ Transformation complete. Processed {processed_count} matches.")
+    log(f"Transformation complete. Processed {processed_count} matches.")
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(_app: FastAPI):
+    """
+    Lifespan context manager for the FastAPI app.
+    Starts the background scheduler on startup and shuts it down on exit.
+
+    Args:
+        _app (FastAPI): The application instance (unused).
+    """
     scheduler = BackgroundScheduler()
+    # Process every 1 minute
     scheduler.add_job(run_transform_job, 'interval', minutes=1)
     scheduler.start()
-    log("🚀 Transformer Started (Key-Mismatch Fix Enabled)")
+    log("Transformer Started (Key-Mismatch Fix Enabled)")
     yield
     scheduler.shutdown()
 
@@ -177,10 +214,23 @@ app = FastAPI(lifespan=lifespan)
 
 
 @app.get("/")
-def root(): return {"status": "Transformer Running"}
+def root():
+    """
+    Health check endpoint.
+
+    Returns:
+        dict: Status message.
+    """
+    return {"status": "Transformer Running"}
 
 
 @app.get("/trigger_process")
 def manual_trigger():
+    """
+    Manually triggers the transformation job via API.
+
+    Returns:
+        dict: Status message.
+    """
     run_transform_job()
     return {"status": "Manual job triggered"}

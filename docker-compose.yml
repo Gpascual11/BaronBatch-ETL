@@ -13,31 +13,27 @@ services:
     volumes:
       - mongo_data:/data/db
 
-  # --- EXTRACTOR 1 ---
+  # --- EXTRACTOR 1 (Uses Key #1) ---
   extractor_1:
     build: ./extractor
     container_name: extractor_1
     command: uvicorn main:app --host 0.0.0.0 --port 8000
-    # Map internal port 8000 to external 8001
     ports:
       - "8001:8000"
     environment:
-      # Use Key #1
       - RIOT_API_KEY=${RIOT_API_KEY_1}
     depends_on:
       - db
       - redis
 
-  # --- EXTRACTOR 2 ---
+  # --- EXTRACTOR 2 (Uses Key #2) ---
   extractor_2:
     build: ./extractor
     container_name: extractor_2
     command: uvicorn main:app --host 0.0.0.0 --port 8000
-    # Map to 8004 to avoid conflict
     ports:
       - "8004:8000"
     environment:
-      # Use Key #2
       - RIOT_API_KEY=${RIOT_API_KEY_2}
     depends_on:
       - db
@@ -59,7 +55,7 @@ services:
     ports:
       - "8003:8000"
     environment:
-      # API Service only needs 1 key (any valid key) just to resolve PUUIDs
+      # API Service needs a key to resolve names to PUUIDs initially
       - RIOT_API_KEY=${RIOT_API_KEY_1}
     depends_on:
       - db

@@ -15,7 +15,6 @@ def riot_get(url):
     return r.json()
 
 def get_rank(game_name, tag_line):
-    # 1️⃣ OBTENIR PUUID
     acc_url = (
         f"https://{REGION}.api.riotgames.com/riot/account/v1/accounts/"
         f"by-riot-id/{game_name}/{tag_line}?api_key={API_KEY}"
@@ -27,7 +26,6 @@ def get_rank(game_name, tag_line):
 
     puuid = acc_data["puuid"]
 
-    # 2️⃣ INTENTAR obtenir encryptedSummonerId via Summoner-V4
     sum_url = (
         f"https://{PLATFORM}.api.riotgames.com/lol/summoner/v4/summoners/"
         f"by-puuid/{puuid}?api_key={API_KEY}"
@@ -37,7 +35,6 @@ def get_rank(game_name, tag_line):
     if sum_data and "id" in sum_data:
         encrypted_id = sum_data["id"]
 
-        # 3️⃣ Rang normal via league/v4
         league_url = (
             f"https://{PLATFORM}.api.riotgames.com/lol/league/v4/entries/"
             f"by-summoner/{encrypted_id}?api_key={API_KEY}"
@@ -45,7 +42,6 @@ def get_rank(game_name, tag_line):
         leagues = riot_get(league_url)
         return {"method": "summoner_v4", "rank": leagues, "puuid": puuid}
 
-    # ❗ 4️⃣ SUMMONER-V4 HA FALLAT → USAR league-exp-v4
     print("⚠ Summoner-V4 failed, using league-exp-v4...")
 
     queues = ["RANKED_SOLO_5x5", "RANKED_FLEX_SR"]
@@ -54,7 +50,6 @@ def get_rank(game_name, tag_line):
              "SILVER","BRONZE","IRON"]
     divs = ["I","II","III","IV"]
 
-    # BUSCAR EL PUUID A LA LLIGA
     for queue in queues:
         for tier in tiers:
             for div in divs:
