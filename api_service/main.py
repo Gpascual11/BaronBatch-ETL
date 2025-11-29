@@ -84,19 +84,39 @@ def add_summoner(request: SummonerRequest):
 
     db.summoners.update_one({"puuid": puuid}, {"$set": update_data}, upsert=True)
 
-    # Push single task to Redis
     try:
-        task_payload = {
-            "puuid": puuid,
-            "limit": 200,
-            "action": "extract"
-        }
-        redis_client.lpush("extraction_queue", json.dumps(task_payload))
+        # SPLIT INTO 4 TASKS OF 50 (Total 200)
+        # This keeps us under the 100 request/2min limit per key per batch
+
+        # Batch 1: 0-50 (+ Profile Update)
+        redis_client.lpush("extraction_queue", json.dumps({
+            "action": "extract_batch", "puuid": puuid,
+            "start": 0, "count": 50, "update_profile": True
+        }))
+
+        # Batch 2: 50-100
+        redis_client.lpush("extraction_queue", json.dumps({
+            "action": "extract_batch", "puuid": puuid,
+            "start": 50, "count": 50, "update_profile": False
+        }))
+
+        # Batch 3: 100-150
+        redis_client.lpush("extraction_queue", json.dumps({
+            "action": "extract_batch", "puuid": puuid,
+            "start": 100, "count": 50, "update_profile": False
+        }))
+
+        # Batch 4: 150-200
+        redis_client.lpush("extraction_queue", json.dumps({
+            "action": "extract_batch", "puuid": puuid,
+            "start": 150, "count": 50, "update_profile": False
+        }))
+
     except Exception as e:
         print(f"⚠️ Redis Error: {e}")
 
     return {
-        "message": f"✅ {real_name} queued for update (200 games)!",
+        "message": f"✅ {real_name} added! Queued 4 batches (200 games).",
         "correct_name": real_name
     }
 
@@ -200,16 +220,25 @@ def force_refresh():
         count = 0
         # 2. Create a separate task for each user
         for u in users:
-            payload = {
-                "action": "extract",
+            # Batch 1 (0-100 + Profile)
+            redis_client.lpush("extraction_queue", json.dumps({
+                "action": "extract_batch",
                 "puuid": u["puuid"],
-                "limit": 200  # Request 200 games per user
-            }
-            redis_client.lpush("extraction_queue", json.dumps(payload))
-            count += 1
+                "start": 0,
+                "count": 100,
+                "update_profile": True
+            }))
+            # Batch 2 (100-200)
+            redis_client.lpush("extraction_queue", json.dumps({
+                "action": "extract_batch",
+                "puuid": u["puuid"],
+                "start": 100,
+                "count": 100,
+                "update_profile": False
+            }))
+            count += 2
 
-        return {"status": f"🚀 Distributed {count} tasks to Queue (Limit 200)"}
-
+        return {"status": f"🚀 Distributed {count} batch tasks to Queue"}
     except Exception as e:
         return {"status": "Error", "detail": str(e)}
 
@@ -233,10 +262,11 @@ def get_stats(summoner: str):
 
     puuid = summ.get("puuid")
 
+    # INCREASE LIMIT TO 300 to show all fetched games
     matches = list(
         db.matches_clean.find({"puuid": puuid}, {"_id": 0})
         .sort([("game_timestamp", -1)])
-        .limit(200)
+        .limit(300)
     )
 
     agg_dict = {}
