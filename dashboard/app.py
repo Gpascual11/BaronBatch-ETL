@@ -12,7 +12,120 @@ API_URL = os.getenv("API_URL", "http://api_service:8000")
 
 st.set_page_config(page_title="LoL Pro Grid", layout="wide")
 
+# --- CUSTOM CSS STYLING (Moved to top for immediate loading) ---
+st.markdown("""
+<style>
+    /* Importar fuente estilo Gaming (Oswald) */
+    @import url('https://fonts.googleapis.com/css2?family=Oswald:wght@300;400;700&display=swap');
 
+    html, body, [class*="css"]  {
+        font-family: 'Oswald', sans-serif;
+    }
+
+    /* Fondo general con un degradado sutil */
+    .stApp {
+        background: linear-gradient(180deg, #091428 0%, #040810 100%);
+    }
+
+    /* Sidebar más oscura y con borde dorado sutil */
+    [data-testid="stSidebar"] {
+        background-color: #0a0a0c;
+        border-right: 1px solid #333;
+    }
+
+    /* Títulos y Encabezados */
+    h1, h2, h3 {
+        color: #f0e6d2 !important;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+        text-shadow: 0 0 10px rgba(212, 175, 55, 0.3);
+    }
+
+    /* Inputs de texto personalizados */
+    .stTextInput input {
+        background-color: #1e2328 !important;
+        color: #f0e6d2 !important;
+        border: 1px solid #c8aa6e !important;
+        border-radius: 4px;
+    }
+
+    /* Botones primarios (Estilo Hextech) */
+    .stButton button[type="primary"] {
+        background: linear-gradient(45deg, #c8aa6e, #7a5c29);
+        color: #000;
+        border: none;
+        font-weight: bold;
+        text-transform: uppercase;
+        transition: all 0.3s ease;
+    }
+    .stButton button[type="primary"]:hover {
+        box-shadow: 0 0 15px #c8aa6e;
+        transform: scale(1.02);
+    }
+
+    /* Botones secundarios */
+    .stButton button {
+        background-color: #1e2328;
+        color: #cdbe91;
+        border: 1px solid #444;
+    }
+
+    /* Tabs personalizadas */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 10px;
+    }
+    .stTabs [data-baseweb="tab"] {
+        background-color: rgba(255,255,255,0.05);
+        border-radius: 4px;
+        border: none;
+        color: #888;
+    }
+    .stTabs [aria-selected="true"] {
+        background-color: #c8aa6e !important;
+        color: #000 !important;
+        font-weight: bold;
+    }
+
+    /* MATCH CARD STYLES (Mejorado) */
+    .match-card { 
+        background: rgba(20, 20, 30, 0.6); 
+        backdrop-filter: blur(10px);
+        border-radius: 8px; 
+        padding: 10px; 
+        margin-bottom: 8px; 
+        border: 1px solid rgba(255,255,255,0.05);
+        border-left: 4px solid #333; 
+        transition: transform 0.2s;
+    }
+    .match-card:hover {
+        transform: translateX(5px);
+        background: rgba(30, 30, 40, 0.8);
+    }
+    .win { 
+        border-left-color: #0ac8b9; /* Cyan Hextech para victoria */
+        background: linear-gradient(90deg, rgba(10, 200, 185, 0.1) 0%, rgba(0,0,0,0) 100%);
+    }
+    .loss { 
+        border-left-color: #e84057; 
+        background: linear-gradient(90deg, rgba(232, 64, 87, 0.1) 0%, rgba(0,0,0,0) 100%);
+    }
+
+    /* Textos dentro de las cards */
+    .kda-main { font-weight:bold; font-size:1.1em; color: #fff; letter-spacing: 1px;}
+    .meta { font-size:0.75em; color:#aaa; font-family: sans-serif;}
+    .item-icon { width:22px; height:22px; border-radius:3px; border:1px solid #444; box-shadow: 0 0 5px rgba(0,0,0,0.5);}
+    .player-row { display: flex; justify-content: space-between; font-size: 0.8em; padding: 3px 0; border-bottom: 1px solid rgba(255,255,255,0.05); }
+
+    /* Dataframe styling */
+    [data-testid="stDataFrame"] {
+        background-color: rgba(0,0,0,0.2);
+        border: 1px solid #333;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+
+# --- ASSETS ---
 @st.cache_data
 def get_ddragon_version():
     """
@@ -73,6 +186,7 @@ def get_queue_name(qid):
     return queues.get(qid, f"Queue {qid}")
 
 
+# --- STATE ---
 if 'current_user' not in st.session_state: st.session_state['current_user'] = None
 
 
@@ -153,6 +267,7 @@ def trigger_nuke():
         return False
 
 
+# --- SIDEBAR ---
 with st.sidebar:
     st.title("🎮 LoL Pro")
     st.caption(f"Patch: {VER}")
@@ -217,6 +332,7 @@ with st.sidebar:
                 else:
                     st.error("Reset Failed")
 
+# --- MAIN ---
 st.write("")
 c1, c2 = st.columns([4, 1])
 with c1:
@@ -265,6 +381,7 @@ total_wins = sum(1 for m in matches if m['win'])
 general_wr = (total_wins / total_games * 100) if total_games > 0 else 0
 wr_color = "#5383e8" if general_wr >= 50 else "#e84057"
 
+# --- HEADER ---
 c_prof, c_inf, c_rank = st.columns([1, 3, 2])
 with c_prof:
     icon_id_raw = res.get('profile_icon', 29)
@@ -319,108 +436,7 @@ with c_rank:
 
 st.markdown("---")
 
-st.markdown("""
-<style>
-    @import url('https://fonts.googleapis.com/css2?family=Oswald:wght@300;400;700&display=swap');
-
-    html, body, [class*="css"]  {
-        font-family: 'Oswald', sans-serif;
-    }
-
-    .stApp {
-        background: linear-gradient(180deg, #091428 0%, #040810 100%);
-    }
-
-    [data-testid="stSidebar"] {
-        background-color: #0a0a0c;
-        border-right: 1px solid #333;
-    }
-
-    h1, h2, h3 {
-        color: #f0e6d2 !important;
-        text-transform: uppercase;
-        letter-spacing: 1px;
-        text-shadow: 0 0 10px rgba(212, 175, 55, 0.3);
-    }
-
-    .stTextInput input {
-        background-color: #1e2328 !important;
-        color: #f0e6d2 !important;
-        border: 1px solid #c8aa6e !important;
-        border-radius: 4px;
-    }
-
-    .stButton button[type="primary"] {
-        background: linear-gradient(45deg, #c8aa6e, #7a5c29);
-        color: #000;
-        border: none;
-        font-weight: bold;
-        text-transform: uppercase;
-        transition: all 0.3s ease;
-    }
-    .stButton button[type="primary"]:hover {
-        box-shadow: 0 0 15px #c8aa6e;
-        transform: scale(1.02);
-    }
-
-    .stButton button {
-        background-color: #1e2328;
-        color: #cdbe91;
-        border: 1px solid #444;
-    }
-
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 10px;
-    }
-    .stTabs [data-baseweb="tab"] {
-        background-color: rgba(255,255,255,0.05);
-        border-radius: 4px;
-        border: none;
-        color: #888;
-    }
-    .stTabs [aria-selected="true"] {
-        background-color: #c8aa6e !important;
-        color: #000 !important;
-        font-weight: bold;
-    }
-
-    .match-card { 
-        background: rgba(20, 20, 30, 0.6); 
-        backdrop-filter: blur(10px);
-        border-radius: 8px; 
-        padding: 10px; 
-        margin-bottom: 8px; 
-        border: 1px solid rgba(255,255,255,0.05);
-        border-left: 4px solid #333; 
-        transition: transform 0.2s;
-    }
-    .match-card:hover {
-        transform: translateX(5px);
-        background: rgba(30, 30, 40, 0.8);
-    }
-    .win { 
-        border-left-color: #0ac8b9; 
-        background: linear-gradient(90deg, rgba(10, 200, 185, 0.1) 0%, rgba(0,0,0,0) 100%);
-    }
-    .loss { 
-        border-left-color: #e84057; 
-        background: linear-gradient(90deg, rgba(232, 64, 87, 0.1) 0%, rgba(0,0,0,0) 100%);
-    }
-
-    .kda-main { font-weight:bold; font-size:1.1em; color: #fff; letter-spacing: 1px;}
-    .meta { font-size:0.75em; color:#aaa; font-family: sans-serif;}
-    .item-icon { width:22px; height:22px; border-radius:3px; border:1px solid #444; box-shadow: 0 0 5px rgba(0,0,0,0.5);}
-    .player-row { display: flex; justify-content: space-between; font-size: 0.8em; padding: 3px 0; border-bottom: 1px solid rgba(255,255,255,0.05); }
-
-    /* Dataframe styling */
-    [data-testid="stDataFrame"] {
-        background-color: rgba(0,0,0,0.2);
-        border: 1px solid #333;
-    }
-</style>
-""", unsafe_allow_html=True)
-
-tab_hist, tab_stats = st.tabs(["Match History", "Stats"])
+tab_hist, tab_stats = st.tabs(["📜 Match History", "🏆 Stats"])
 
 with tab_hist:
     t_all, t_solo, t_flex, t_aram = st.tabs(["All", "SoloQ", "Flex", "ARAM"])
