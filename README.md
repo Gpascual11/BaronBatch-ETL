@@ -1,233 +1,152 @@
-🎮 LoL Pro Grid - Advanced ETL Pipeline
+Here is the updated documentation for your project, reflecting the new distributed architecture:
 
-A fully automated League of Legends data analysis system based on Docker microservices.
+# 🎮 LoL Pro Grid - Distributed ETL Pipeline
 
-This project implements a professional ETL (Extract, Transform, Load) architecture to monitor professional players, analyze their matches, and visualize advanced statistics in real-time.
+> **A fully automated, distributed League of Legends data analysis system based on Microservices.**
 
-🏗️ System Architecture
+This project implements a professional **ETL (Extract, Transform, Load)** architecture designed to bypass API rate limits and process massive amounts of match data in real-time using parallel worker nodes.
 
-The system is divided into 5 Docker containers that work asynchronously and independently:
+## 🏗️ System Architecture
 
-Service
+The system is orchestrated using **Docker Compose** and consists of **6 interacting services**:
 
-Technology
+| Service | Tech Stack | Type | Description |
+| :--- | :--- | :--- | :--- |
+| **`dashboard`** | Streamlit | **Frontend** | Interactive UI for searching players, visualizing winrates, and triggering updates. |
+| **`api_service`** | FastAPI | **Orchestrator** | Manages user data, splits jobs into small batches, and pushes tasks to Redis. |
+| **`redis`** | Redis | **Message Queue** | Acts as the buffer between the API and Extractors. Holds the "Task List". |
+| **`extractor`** | Python | **Worker (x2)** | **Extract (E).** Independent workers that pull tasks from Redis and download data from Riot using unique API keys. |
+| **`transformer`** | Python | **Processor** | **Transform (T).** Cleans raw JSONs, normalizes IDs (Key Mismatch fix), and calculates stats. |
+| **`db`** | MongoDB | **Storage** | Stores raw JSON (for data lakes) and structured clean data (for analytics). |
 
-Main Function
+### 🔄 Data Flow ( The Pipeline )
 
-dashboard
+1.  **Trigger:** User adds `Agurin#DND` via the Dashboard.
+2.  **Orchestration:** `api_service` validates the user and **splits the match history** (e.g., 200 games) into smaller tasks of **50 matches**.
+3.  **Queueing:** These tasks are pushed to the `extraction_queue` in **Redis**.
+4.  **Distributed Extraction:**
+      * **Extractor 1** (Key A) and **Extractor 2** (Key B) race to pick up tasks.
+      * If one key hits a Rate Limit (429), that worker sleeps while the other keeps working.
+      * **Smart Resolution:** If a worker picks up a task encrypted for a different key, it auto-translates the ID locally.
+5.  **Transformation:** The `transformer_loader` detects new raw data, cleans it (removing unused fields), and saves it to `matches_clean`.
+6.  **Visualization:** The Dashboard pulls the aggregated stats from the DB via the API.
 
-Streamlit (Python)
+-----
 
-Frontend. User interface to search for players and view statistics.
+## 🚀 Getting Started
 
-api_service
+### Prerequisites
 
-FastAPI
+  * **Docker Desktop** installed.
+  * **1 or 2 Riot API Keys** (Get them at [developer.riotgames.com](https://developer.riotgames.com)).
 
-Read Layer & Orchestrator. Manages player registration, distributes tasks to Redis, and serves clean data.
+### 1\. Configuration
 
-extractor
+Create a `.env` file in the root directory. You can use two different keys to double your speed, or the same key twice if you only have one.
 
-Python + Requests
-
-Extract (E). Worker nodes that download data from Riot (Matches, Profiles) handling Rate Limits & Encryption.
-
-transformer_loader
-
-Python + Pandas
-
-Transform & Load (T/L). Processes raw JSONs, normalizes player IDs, calculates KDA/Stats, and saves clean data.
-
-db
-
-MongoDB
-
-Storage. NoSQL database storing both raw JSON responses and processed analytical data.
-
-redis
-
-Redis
-
-Message Queue. Buffer between API and Extractors to manage load balancing.
-
-🔄 Data Flow (Pipeline)
-
-Trigger (Registration): The user adds a player (e.g., Agurin#DND) via the Dashboard.
-
-Validation & Routing: The api_service connects to Riot (Account-V1) to obtain the PUUID and automatically determine the region (EUW, KR, NA...).
-
-Task Distribution: The api_service splits the history fetch into batches (e.g., 0-50, 50-100) and pushes tasks to Redis.
-
-Intelligent Extraction: The extractor workers pick up tasks from Redis:
-
-Load Balancing: Multiple extractors work in parallel using different API Keys.
-
-Key Mismatch Resolution: Detects if a PUUID is encrypted for a different key and automatically resolves a local ID to continue processing.
-
-Anti-Blocking: Automatically sleeps when hitting Rate Limits (429).
-
-Transformation: The transformer_loader detects new raw files in the DB, identifies the correct player (even with missing tags), calculates statistics, and generates the final data model.
-
-Visualization: The Dashboard displays data with official icons (DDragon/CommunityDragon) and interactive charts.
-
-🚀 How to Start the Project
-
-Prerequisites
-
-Docker and Docker Compose installed.
-
-A valid Riot API Key (get one at developer.riotgames.com).
-
-1. Configuration
-
-Create a .env file at the root of the project with your keys:
-
-# You can use two different keys for double the speed, or the same key twice
+```bash
+# .env file
 RIOT_API_KEY_1=RGAPI-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 RIOT_API_KEY_2=RGAPI-yyyyyyyy-yyyy-yyyy-yyyy-yyyyyyyyyyyy
+```
 
+### 2\. Launch
 
-2. Deployment
+Run the entire stack in the background:
 
-Open a terminal in the project folder and run:
-
-# Build and start all containers in the background
+```bash
 docker-compose up -d --build
+```
 
+### 3\. Usage
 
-3. Access
+Access the dashboard at:
+👉 **[http://localhost:8501](https://www.google.com/search?q=http://localhost:8501)**
 
-Open your browser and go to:
-👉 http://localhost:8501
+-----
 
-🧰 Command Toolbox (Cheat Sheet)
+## 🧰 Command Cheat Sheet
 
-📡 Docker Management
+### Service Management
 
-Control the state of your containers.
+| Goal | Command |
+| :--- | :--- |
+| **View Backend Logs** | `docker logs -f api_service` |
+| **View Extractor Activity** | `docker logs -f extractor_1` (or `extractor_2`) |
+| **Restart a Service** | `docker-compose restart transformer_loader` |
+| **Stop Everything** | `docker-compose down` |
 
-Action
+### Manual Triggers (API)
 
-Command
+You can manually trigger jobs using `curl` or your browser:
 
-Start everything (with build)
+  * **Refresh All Users:** `http://localhost:8003/refresh`
+  * **Trigger Extraction (50 games):** `http://localhost:8001/trigger_extract?count=50`
 
-docker-compose up -d --build
+### Database (MongoDB)
 
-View status
+Access the database shell inside Docker:
 
-docker ps
+```bash
+docker exec -it db mongosh riot
+```
 
-Stop and clean networks
+Useful commands:
 
-docker-compose down
+```javascript
+db.matches_raw.countDocuments()   // See how many raw JSONs you have
+db.matches_clean.countDocuments() // See how many processed games you have
+db.summoners.find().pretty()      // List all tracked users
+```
 
-Restart specific services
+-----
 
-docker-compose restart api_service extractor_1
+## 🛠️ Key Features
 
-View logs in real-time
+### 🛡️ Rate Limit "Anti-Blocking"
 
-docker logs -f extractor_1 (or api_service, transformer_loader)
+Riot limits Dev keys to 100 requests every 2 minutes.
 
-💾 Database Management (MongoDB)
+  * **The Problem:** Downloading 200 matches takes \~201 requests.
+  * **Our Solution:** The `api_service` splits the job into 4 batches of 50. The extractors process a batch, sleep if needed, and let the other extractor handle the rest.
 
-How to enter the system's "guts" to see real data.
+### 🔑 Key Mismatch Resolution
 
-1. Enter Mongo console (Inside Docker):
+Riot encrypts PUUIDs differently for every API Key application.
 
-docker exec -it db mongosh
+  * **The Issue:** User added with Key A cannot be read by Extractor using Key B.
+  * **Our Fix:** The Extractors detect `400 Bad Request` decryption errors and automatically call `Account-V1` to get a "local" PUUID valid for their specific key, ensuring seamless multi-key processing.
 
+### 🌍 Auto-Region Discovery
 
-2. Basic Mongo Commands (mongosh):
+You don't need to select a region. The system analyzes the tag line:
 
-Action
+  * `#KR1` -\> routes to **Korea**
+  * `#NA1` -\> routes to **North America**
+  * `#EUW` -\> routes to **Europe**
 
-Mongo Command
+-----
 
-Select DB
+## 📂 Project Structure
 
-use riot
-
-View collections
-
-show collections
-
-Count downloaded matches
-
-db.matches_raw.countDocuments()
-
-Count clean matches
-
-db.matches_clean.countDocuments()
-
-View a player
-
-db.summoners.find({summonerName: "Agurin#DND"}).pretty()
-
-Delete clean data
-
-db.matches_clean.drop()
-
-Reset processing
-
-db.matches_raw.updateMany({}, {$set: {processed: false}})
-
-Delete everything (Nuclear)
-
-db.dropDatabase()
-
-🛠️ Key Features ("The Cool Stuff")
-
-🌍 Automatic Multi-Region: The system detects if the player is Korean (#KR1), American (#NA1), or European just by looking at the Tag. No configuration needed.
-
-🛡️ Anti-Blocking System (Rate Limits): If Riot sends a 429 error (Too Many Requests), the extractor automatically enters "sleep" mode for 2 minutes and resumes work afterward.
-
-🔑 Distributed Multi-Key Support: Uses multiple extractors with different API keys. Includes logic to "translate" encrypted IDs between keys on the fly.
-
-🕵️‍♂️ "Impossible" Rank Extraction: Uses three strategies (Plan A, B, and C) to find the rank of high-Elo players that the standard API often hides.
-
-🎨 Robust Images: Uses a combination of DDragon (Official) and CommunityDragon to ensure we always have item and champion images, even if names change (e.g., Wukong vs MonkeyKing).
-
-⏱️ Automation: Includes internal schedulers (APScheduler) in both Extractor and Transformer to update data and process statistics automatically.
-
-🚑 Common Issues Troubleshooting
-
-1. "Dashboard doesn't load (Connection Refused)"
-
-If you just started your computer, the Database might take a few seconds to wake up.
-
-Solution: Wait 10 seconds and refresh. If not working: docker-compose restart api_service.
-
-2. "Images not showing (Broken Image)"
-
-If you are on a restrictive network (like Eduroam or offices), some CDNs might be blocked or DNS might fail.
-
-Solution: The current code uses official Riot routes (DDragon) which are usually allowed. Ensure you have stable internet.
-
-3. "Rank shows Unranked but is Challenger"
-
-The extractor may take a few minutes to do the massive sweep of the Challenger league if the standard endpoint fails.
-
-Solution: Force a manual update via the Dashboard "Update" button and check logs: docker logs -f extractor_1.
-
-📂 File Structure
-
+```
 riot_etl_project/
-├── docker-compose.yml      # Service orchestrator
-├── .env                    # Environment variables (Secret)
-├── api_service/            # API (FastAPI) & Orchestrator
-│   ├── Dockerfile
-│   └── main.py
-├── extractor/              # ETL Extract (Python Worker)
-│   ├── Dockerfile
-│   └── main.py             # Complex Riot API logic
-├── transformer_loader/     # ETL Transform (Python Processor)
-│   ├── Dockerfile
-│   └── main.py             # Data cleaning and calculations
-└── dashboard/              # Frontend (Streamlit)
-    ├── Dockerfile
-    └── app.py              # Graphical interface
+├── docker-compose.yml       # Orchestrates the 5 containers + DB + Redis
+├── .env                     # API Keys (Not in repo)
+├── api_service/             # [FastAPI] The Brain. Talks to DB & Redis.
+│   ├── main.py
+│   └── Dockerfile
+├── extractor/               # [Python] The Muscle. Downloads data.
+│   ├── main.py              # Contains Rate Limit & Key logic
+│   └── Dockerfile
+├── transformer_loader/      # [Python] The Logic. Cleans data.
+│   ├── main.py              # Stats calculation (KDA, CS/min)
+│   └── Dockerfile
+└── dashboard/               # [Streamlit] The Face.
+    ├── app.py
+    └── Dockerfile
+```
 
+-----
 
-Created with ❤️, Python, and lots of patience with the Riot API.
+*Built with ❤️, Python, and Microservices.*
