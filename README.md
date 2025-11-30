@@ -145,6 +145,9 @@ riot_etl_project/
 │   ├── main.py              # Stats calculation (KDA, CS/min)
 │   └── Dockerfile
 └── dashboard/               # [Streamlit] The Face.
+    ├── assets/
+    │   ├── logo.png
+    │   └── logo_small.png
     ├── app.py
     └── Dockerfile
 ```
