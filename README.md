@@ -8,6 +8,10 @@
 
 This project implements a professional **ETL (Extract, Transform, Load)** architecture designed to bypass API rate limits and process massive amounts of match data in real-time using parallel worker nodes.
 
+<div align="center">
+<img src="dashboard/assets/screenshot.png" alt="BaronBatch ETL Logo" width="300">
+</div>
+
 ## 🏗️ System Architecture
 
 The system is orchestrated using **Docker Compose** and consists of **6 interacting services**:

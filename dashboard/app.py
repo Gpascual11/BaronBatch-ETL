@@ -26,7 +26,6 @@ st.markdown("""
 
     header[data-testid="stHeader"] {
         background-color: transparent;
-        visibility: hidden;
     }
     .stApp > header + div {
         padding-top: 1rem; 

@@ -1,3 +1,5 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from pymongo import MongoClient
@@ -16,7 +18,38 @@ db = mongo["riot"]
 
 redis_client = redis.Redis(host='redis', port=6379, db=0, decode_responses=True)
 
-app = FastAPI()
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """
+    Handles startup tasks. Checks Database and API connectivity.
+    Uses 'Soft Fail' logic: If the internet is down, it logs a warning
+    but lets the app start so it doesn't enter a crash loop.
+    """
+    print("API Service Starting...")
+    try:
+        mongo.admin.command('ping')
+        print("MongoDB Connection: OK")
+    except Exception as e:
+        print(f"MongoDB Connection Failed: {e}")
+
+    try:
+        # Simple check to a status endpoint
+        test_url = f"https://euw1.api.riotgames.com/lol/status/v4/platform-data?api_key={RIOT_API_KEY}"
+        r = requests.get(test_url, timeout=5)
+        if r.status_code == 200:
+            print("Riot API Key: VALID")
+        else:
+            print(f"Riot API Key Issue: {r.status_code}")
+    except Exception as e:
+        print(f"Network Check Failed (Offline?): {e}")
+        print("Service starting anyway. Will retry connections later.")
+
+    yield
+    print("API Service Shutting Down...")
+
+
+app = FastAPI(lifespan=lifespan)
 
 
 class SummonerRequest(BaseModel):

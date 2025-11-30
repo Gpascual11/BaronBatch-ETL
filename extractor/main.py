@@ -497,21 +497,17 @@ def redis_worker():
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    """
-    Lifespan context manager for the FastAPI app.
-    Handles startup (API key validation, DB indexing, starting workers/schedulers)
-    and shutdown.
-
-    Args:
-        _app (FastAPI): The FastAPI application instance (unused).
-    """
     log(f"Validating API Key: {RIOT_API_KEY[:5]}...")
-    test_url = f"https://euw1.api.riotgames.com/lol/status/v4/platform-data?api_key={RIOT_API_KEY}"
-    r = requests.get(test_url)
-    if r.status_code == 200:
-        log("API Key is VALID")
-    else:
-        log(f"API KEY INVALID: {r.status_code} - {r.text}")
+    try:
+        test_url = f"https://euw1.api.riotgames.com/lol/status/v4/platform-data?api_key={RIOT_API_KEY}"
+        r = requests.get(test_url, timeout=5)
+        if r.status_code == 200:
+            log("API Key is VALID")
+        else:
+            log(f"API KEY INVALID: {r.status_code} - {r.text}")
+    except Exception as e:
+        log(f"Startup Network Check Failed (Offline?): {e}")
+        log("Service starting anyway to await connectivity...")
 
     try:
         db.matches_raw.create_index("matchId", unique=True)
@@ -521,14 +517,12 @@ async def lifespan(_app: FastAPI):
     threading.Thread(target=redis_worker, daemon=True).start()
 
     scheduler = BackgroundScheduler()
-    # Auto-update every 10 minutes
     scheduler.add_job(run_extraction_job, 'interval', minutes=10)
     scheduler.start()
 
     log("Extractor Service Ready")
     yield
     scheduler.shutdown()
-
 
 app = FastAPI(lifespan=lifespan)
 
