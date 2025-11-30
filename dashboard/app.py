@@ -280,7 +280,7 @@ def trigger_nuke():
 # --- SIDEBAR ---
 with st.sidebar:
     if os.path.exists("assets/logo.png"):
-        st.image("assets/logo.png", use_container_width=True)
+        st.image("assets/logo.png", width="stretch")
 
     st.caption(f"Patch: {VER}")
 
@@ -310,7 +310,7 @@ with st.sidebar:
 
     if st.session_state['current_user']:
         st.write("")
-        if st.button("🗑️ Delete User", type="primary", use_container_width=True):
+        if st.button("🗑️ Delete User", type="primary", width="stretch"):
             target_to_del = st.session_state['current_user']
             if delete_user(target_to_del):
                 st.session_state['current_user'] = None
@@ -553,7 +553,8 @@ with tab_stats:
             df[['Img', 'champion', 'games', 'winrate', 'avg_kda']],
             column_config={"Img": st.column_config.ImageColumn(""),
                            "winrate": st.column_config.NumberColumn("WR%", format="%.1f")},
-            use_container_width=True, hide_index=True
+            width="stretch",
+            hide_index=True
         )
     else:
         st.info("No data available.")

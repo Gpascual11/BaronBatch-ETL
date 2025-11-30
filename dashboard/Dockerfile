@@ -4,6 +4,8 @@ WORKDIR /app
 
 RUN apk add --no-cache tzdata
 
+ENV TZ=Europe/Madrid
+
 RUN pip install --no-cache-dir streamlit requests pandas python-dotenv
 
 COPY . .
