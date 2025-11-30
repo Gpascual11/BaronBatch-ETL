@@ -9,10 +9,10 @@
 This project implements a professional **ETL (Extract, Transform, Load)** architecture designed to bypass API rate limits and process massive amounts of match data in real-time using parallel worker nodes.
 
 <div align="center">
-<img src="dashboard/assets/screenshot.png" alt="BaronBatch ETL Logo" width="300">
+<img src="dashboard/assets/screenshot.png" alt="BaronBatch Dashboard Screenshot" width="100%" style="border-radius: 10px; border: 2px solid #3c1f51;">
 </div>
 
-## 🏗️ System Architecture
+## System Architecture
 
 The system is orchestrated using **Docker Compose** and consists of **6 interacting services**:
 
@@ -25,9 +25,9 @@ The system is orchestrated using **Docker Compose** and consists of **6 interact
 | **`transformer`** | Python | **Processor** | **Transform (T).** Cleans raw JSONs, normalizes IDs (Key Mismatch fix), and calculates stats. |
 | **`db`** | MongoDB | **Storage** | Stores raw JSON (for data lakes) and structured clean data (for analytics). |
 
-### 🔄 Data Flow ( The Pipeline )
+### Data Flow ( The Pipeline )
 
-1.  **Trigger:** User adds `Agurin#DND` via the Dashboard.
+1.  **Trigger:** User adds for example `Agurin#DND` via the Dashboard.
 2.  **Orchestration:** `api_service` validates the user and **splits the match history** (e.g., 200 games) into smaller tasks of **50 matches**.
 3.  **Queueing:** These tasks are pushed to the `extraction_queue` in **Redis**.
 4.  **Distributed Extraction:**
@@ -39,7 +39,7 @@ The system is orchestrated using **Docker Compose** and consists of **6 interact
 
 -----
 
-## 🚀 Getting Started
+## Getting Started
 
 ### Prerequisites
 
@@ -71,7 +71,7 @@ Access the dashboard at:
 
 -----
 
-## 🧰 Command Cheat Sheet
+## Command Cheat Sheet
 
 ### Service Management
 
@@ -107,23 +107,23 @@ db.summoners.find().pretty()      // List all tracked users
 
 -----
 
-## 🛠️ Key Features
+## Key Features
 
-### 🛡️ Rate Limit "Anti-Blocking"
+### Rate Limit "Anti-Blocking"
 
 Riot limits Dev keys to 100 requests every 2 minutes.
 
   * **The Problem:** Downloading 200 matches takes \~201 requests.
   * **Our Solution:** The `api_service` splits the job into 4 batches of 50. The extractors process a batch, sleep if needed, and let the other extractor handle the rest.
 
-### 🔑 Key Mismatch Resolution
+### Key Mismatch Resolution
 
 Riot encrypts PUUIDs differently for every API Key application.
 
   * **The Issue:** User added with Key A cannot be read by Extractor using Key B.
   * **Our Fix:** The Extractors detect `400 Bad Request` decryption errors and automatically call `Account-V1` to get a "local" PUUID valid for their specific key, ensuring seamless multi-key processing.
 
-### 🌍 Auto-Region Discovery
+### Auto-Region Discovery
 
 You don't need to select a region. The system analyzes the tag line:
 
@@ -133,7 +133,7 @@ You don't need to select a region. The system analyzes the tag line:
 
 -----
 
-## 📂 Project Structure
+## Project Structure
 
 ```
 riot_etl_project/
