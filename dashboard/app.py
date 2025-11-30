@@ -10,116 +10,127 @@ import time
 load_dotenv()
 API_URL = os.getenv("API_URL", "http://api_service:8000")
 
-st.set_page_config(page_title="LoL Pro Grid", layout="wide")
+st.set_page_config(
+    page_title="BaronBatch ETL",
+    layout="wide",
+    page_icon="assets/logo_small.png" # Loads the logo on the browser tab
+)
 
-# --- CUSTOM CSS STYLING (Moved to top for immediate loading) ---
 st.markdown("""
 <style>
-    /* Importar fuente estilo Gaming (Oswald) */
     @import url('https://fonts.googleapis.com/css2?family=Oswald:wght@300;400;700&display=swap');
 
     html, body, [class*="css"]  {
         font-family: 'Oswald', sans-serif;
     }
 
-    /* Fondo general con un degradado sutil */
+    header[data-testid="stHeader"] {
+        background-color: transparent;
+        visibility: hidden;
+    }
+    .stApp > header + div {
+        padding-top: 1rem; 
+    }
+    
     .stApp {
-        background: linear-gradient(180deg, #091428 0%, #040810 100%);
+        background: linear-gradient(180deg, #110015 0%, #1A0524 100%);
     }
 
-    /* Sidebar más oscura y con borde dorado sutil */
     [data-testid="stSidebar"] {
-        background-color: #0a0a0c;
-        border-right: 1px solid #333;
+        background-color: #110015;
+        border-right: 1px solid #3c1f51; /* Subtle purple separator */
     }
 
-    /* Títulos y Encabezados */
     h1, h2, h3 {
-        color: #f0e6d2 !important;
+        color: #0ac8b9 !important;
         text-transform: uppercase;
         letter-spacing: 1px;
-        text-shadow: 0 0 10px rgba(212, 175, 55, 0.3);
+        text-shadow: 0 0 15px rgba(10, 200, 185, 0.4);
     }
 
-    /* Inputs de texto personalizados */
     .stTextInput input {
-        background-color: #1e2328 !important;
-        color: #f0e6d2 !important;
-        border: 1px solid #c8aa6e !important;
+        background-color: #1c1226 !important;
+        color: #e0e0e0 !important;
+        border: 1px solid #6c3483 !important;
         border-radius: 4px;
     }
+    .stTextInput input:focus {
+        border-color: #0ac8b9 !important;
+        box-shadow: 0 0 10px rgba(10, 200, 185, 0.3);
+    }
 
-    /* Botones primarios (Estilo Hextech) */
     .stButton button[type="primary"] {
-        background: linear-gradient(45deg, #c8aa6e, #7a5c29);
-        color: #000;
+        background: linear-gradient(45deg, #6c3483, #0ac8b9);
+        color: #fff;
         border: none;
         font-weight: bold;
         text-transform: uppercase;
         transition: all 0.3s ease;
+        box-shadow: 0 4px 15px rgba(0,0,0,0.3);
     }
     .stButton button[type="primary"]:hover {
-        box-shadow: 0 0 15px #c8aa6e;
+        box-shadow: 0 0 20px rgba(10, 200, 185, 0.6);
         transform: scale(1.02);
     }
 
-    /* Botones secundarios */
     .stButton button {
-        background-color: #1e2328;
+        background-color: #1c1226;
         color: #cdbe91;
-        border: 1px solid #444;
+        border: 1px solid #3c1f51;
+    }
+    .stButton button:hover {
+        border-color: #0ac8b9;
+        color: #0ac8b9;
     }
 
-    /* Tabs personalizadas */
     .stTabs [data-baseweb="tab-list"] {
         gap: 10px;
     }
     .stTabs [data-baseweb="tab"] {
-        background-color: rgba(255,255,255,0.05);
+        background-color: rgba(108, 52, 131, 0.1);
         border-radius: 4px;
         border: none;
         color: #888;
     }
     .stTabs [aria-selected="true"] {
-        background-color: #c8aa6e !important;
-        color: #000 !important;
+        background-color: #6c3483 !important; /* Baron Purple */
+        color: #fff !important;
         font-weight: bold;
+        box-shadow: 0 0 10px rgba(108, 52, 131, 0.5);
     }
 
-    /* MATCH CARD STYLES (Mejorado) */
     .match-card { 
-        background: rgba(20, 20, 30, 0.6); 
+        background: rgba(28, 18, 38, 0.7); /* Dark Void transparency */
         backdrop-filter: blur(10px);
         border-radius: 8px; 
         padding: 10px; 
         margin-bottom: 8px; 
-        border: 1px solid rgba(255,255,255,0.05);
+        border: 1px solid rgba(108, 52, 131, 0.3);
         border-left: 4px solid #333; 
         transition: transform 0.2s;
     }
     .match-card:hover {
         transform: translateX(5px);
-        background: rgba(30, 30, 40, 0.8);
+        background: rgba(40, 25, 55, 0.9);
+        border-color: #0ac8b9;
     }
     .win { 
-        border-left-color: #0ac8b9; /* Cyan Hextech para victoria */
-        background: linear-gradient(90deg, rgba(10, 200, 185, 0.1) 0%, rgba(0,0,0,0) 100%);
+        border-left-color: #0ac8b9; /* Neon Cyan for Victory */
+        background: linear-gradient(90deg, rgba(10, 200, 185, 0.15) 0%, rgba(0,0,0,0) 100%);
     }
     .loss { 
         border-left-color: #e84057; 
         background: linear-gradient(90deg, rgba(232, 64, 87, 0.1) 0%, rgba(0,0,0,0) 100%);
     }
 
-    /* Textos dentro de las cards */
     .kda-main { font-weight:bold; font-size:1.1em; color: #fff; letter-spacing: 1px;}
     .meta { font-size:0.75em; color:#aaa; font-family: sans-serif;}
-    .item-icon { width:22px; height:22px; border-radius:3px; border:1px solid #444; box-shadow: 0 0 5px rgba(0,0,0,0.5);}
+    .item-icon { width:22px; height:22px; border-radius:3px; border:1px solid #3c1f51; box-shadow: 0 0 5px rgba(0,0,0,0.5);}
     .player-row { display: flex; justify-content: space-between; font-size: 0.8em; padding: 3px 0; border-bottom: 1px solid rgba(255,255,255,0.05); }
 
-    /* Dataframe styling */
     [data-testid="stDataFrame"] {
         background-color: rgba(0,0,0,0.2);
-        border: 1px solid #333;
+        border: 1px solid #3c1f51;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -269,7 +280,9 @@ def trigger_nuke():
 
 # --- SIDEBAR ---
 with st.sidebar:
-    st.title("🎮 LoL Pro")
+    if os.path.exists("assets/logo.png"):
+        st.image("assets/logo.png", use_container_width=True)
+
     st.caption(f"Patch: {VER}")
 
     st.markdown("### 📂 Players")
@@ -331,6 +344,20 @@ with st.sidebar:
                     st.rerun()
                 else:
                     st.error("Reset Failed")
+
+    # --- FOOTER ---
+    st.markdown("---")
+    st.markdown(
+        """
+        <div style='text-align: center; color: #666; font-size: 0.8em;'>
+            Made by <b>Gpascual11</b><br>
+            <a href='https://github.com/Gpascual11/BaronBatch-ETL' target='_blank' style='color: #0ac8b9; text-decoration: none; font-weight: bold;'>
+                View on GitHub <span style='font-size: 1.2em;'></span>
+            </a>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
 # --- MAIN ---
 st.write("")

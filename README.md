@@ -1,6 +1,8 @@
-Here is the updated documentation for your project, reflecting the new distributed architecture:
+## 👾 BaronBatch ETL - Distributed LoL Analytics
 
-# 🎮 LoL Pro Grid - Distributed ETL Pipeline
+<div align="center">
+<img src="dashboard/assets/logo.png" alt="BaronBatch ETL Logo" width="300">
+</div>
 
 > **A fully automated, distributed League of Legends data analysis system based on Microservices.**
 
